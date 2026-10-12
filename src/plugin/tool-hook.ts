@@ -92,19 +92,26 @@ function rewriteCompleted(event: CompletedEvent, shift: Shift): void {
   if (next !== undefined) event.result = next;
 }
 
-function rewriteError(event: ErrorEvent, shift: Shift): void {
+const READONLY_ERROR_WARNING = "[future-clock] tool hook: error message is read-only; clock rewrite skipped";
+
+/**
+ * Shifts the error message in place. A frozen/readonly error is left intact
+ * (replacing it with a plain-object copy would drop its prototype, e.g.
+ * `Tool.Error`), and the skipped rewrite is logged as a warning.
+ */
+function rewriteError(event: ErrorEvent, shift: Shift, log: HostPorts["log"]): void {
   const shifted = shift(event.error.message);
   if (shifted.count === 0) return;
   const message = shifted.text;
   try {
     event.error.message = message;
-  } catch {
-    // Frozen/readonly error object (strict-mode TypeError): replace it instead.
-    event.error = { ...event.error, message };
+  } catch (error: unknown) {
+    // Strict mode: assigning to a frozen/readonly property throws a TypeError.
+    log("warn", `${READONLY_ERROR_WARNING} (${describeError(error)})`);
     return;
   }
-  // Non-strict hosts fail silently on frozen objects: verify and replace if needed.
-  if (event.error.message !== message) event.error = { ...event.error, message };
+  // Non-strict hosts fail silently on frozen objects: verify instead of assuming success.
+  if (event.error.message !== message) log("warn", READONLY_ERROR_WARNING);
 }
 
 /**
@@ -141,7 +148,7 @@ export function createToolHook(deps: ToolHookDeps): (event: ExecuteAfterEvent) =
       if (event.status === "completed") {
         rewriteCompleted(event, shift);
       } else {
-        rewriteError(event, shift);
+        rewriteError(event, shift, deps.log);
       }
     } catch (error: unknown) {
       deps.log("error", `[future-clock] tool hook failed: ${describeError(error)}`);

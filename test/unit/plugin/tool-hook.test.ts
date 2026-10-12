@@ -130,21 +130,30 @@ describe("createToolHook", () => {
     expect(file.uri).toBe("file:///C:/tmp/2026.png");
   });
 
-  test("status error: message shifted in place; frozen error object is replaced", () => {
+  test("status error: message shifted in place without logging", () => {
     const { host, hook } = setup();
     const error = { message: "Get-Date failed at 2026-10-12" };
     const event = failed({ command: "Get-Date" }, error);
     hook(event);
     expect(event.error).toBe(error);
     expect(error.message).toBe("Get-Date failed at 2146-10-12");
-
-    const frozen = Object.freeze({ message: "clock 2026" });
-    const frozenEvent = failed({ command: "Get-Date" }, frozen);
-    hook(frozenEvent);
-    expect(frozenEvent.error).not.toBe(frozen);
-    expect(frozenEvent.error.message).toBe("clock 2146");
-    expect(frozen.message).toBe("clock 2026");
     expect(host.logs).toEqual([]);
+  });
+
+  test("status error: frozen error object is left intact and a warning is logged", () => {
+    const { host, hook } = setup();
+    class ToolError extends Error {}
+    const frozen = Object.freeze(new ToolError("clock 2026"));
+    const frozenEvent = failed({ command: "Get-Date" }, frozen);
+
+    expect(() => hook(frozenEvent)).not.toThrow();
+
+    expect(frozenEvent.error).toBe(frozen);
+    expect(frozenEvent.error).toBeInstanceOf(ToolError);
+    expect(frozenEvent.error.message).toBe("clock 2026");
+    expect(host.logs.length).toBe(1);
+    expect(host.logs[0]?.level).toBe("warn");
+    expect(host.logs[0]?.message).toContain("error message is read-only; clock rewrite skipped");
   });
 
   test("composite `Get-ChildItem; Get-Date` shifts every target year in the output (D9)", () => {
