@@ -1,0 +1,86 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { buildAddArgs, validateMessage } from "../../../scripts/git/commit";
+import { artifactPath, ARTIFACTS, assertUnder } from "../../../scripts/lib/artifacts";
+
+describe("commit.ts helpers", () => {
+  test("validateMessage accepts valid conventional headers", () => {
+    expect(validateMessage("chore(bootstrap): scaffold")).toBeNull();
+    expect(validateMessage("feat: sem escopo\n\ncorpo")).toBeNull();
+    expect(validateMessage("fix(core)!: breaking")).toBeNull();
+  });
+
+  test("validateMessage rejects Co-Authored-By trailer (any case)", () => {
+    expect(validateMessage("feat(x): ok\n\nCo-Authored-By: Someone <a@b.c>")).not.toBeNull();
+    expect(validateMessage("feat(x): ok\n\nco-authored-by: someone")).not.toBeNull();
+  });
+
+  test("validateMessage rejects 'Generated with'", () => {
+    expect(validateMessage("feat(x): ok\n\nGenerated with a tool")).not.toBeNull();
+  });
+
+  test("validateMessage rejects bad headers", () => {
+    expect(validateMessage("")).not.toBeNull();
+    expect(validateMessage("update stuff")).not.toBeNull();
+    expect(validateMessage("wip(x): nope")).not.toBeNull();
+    expect(validateMessage("feat(x):nospace")).not.toBeNull();
+  });
+
+  test("buildAddArgs lists only the given paths after --", () => {
+    expect(buildAddArgs(["a.ts", "dir/b.ts"])).toEqual(["add", "--", "a.ts", "dir/b.ts"]);
+  });
+});
+
+describe("artifacts", () => {
+  test("artifactPath joins under ARTIFACTS", () => {
+    expect(artifactPath("state", "x.json")).toBe(join(ARTIFACTS, "state", "x.json"));
+  });
+});
+
+describe("assertUnder", () => {
+  let base: string;
+  let root: string;
+  let outside: string;
+
+  beforeAll(async () => {
+    base = await realpath(await mkdtemp(join(tmpdir(), "fc-assert-")));
+    root = join(base, "root");
+    outside = join(base, "outside");
+    await mkdir(join(root, "nested"), { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await symlink(outside, join(root, "link"), "junction");
+  });
+
+  afterAll(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  test("accepts a nested path (existing or not)", async () => {
+    expect(await assertUnder(root, join(root, "nested"))).toBe(join(root, "nested"));
+    expect(await assertUnder(root, join(root, "nested", "new", "file.txt"))).toBe(
+      join(root, "nested", "new", "file.txt"),
+    );
+  });
+
+  test("rejects '..' segments", async () => {
+    await expect(assertUnder(root, `${root}\\nested\\..\\..\\outside`)).rejects.toThrow();
+    await expect(assertUnder(root, `${root}/nested/../x`)).rejects.toThrow();
+  });
+
+  test("rejects UNC and relative paths", async () => {
+    await expect(assertUnder(root, "\\\\server\\share\\x")).rejects.toThrow();
+    await expect(assertUnder(root, "//server/share/x")).rejects.toThrow();
+    await expect(assertUnder(root, "nested\\file.txt")).rejects.toThrow();
+  });
+
+  test("rejects a path outside the root", async () => {
+    await expect(assertUnder(root, outside)).rejects.toThrow();
+  });
+
+  test("rejects a junction pointing outside the root", async () => {
+    await expect(assertUnder(root, join(root, "link"))).rejects.toThrow();
+    await expect(assertUnder(root, join(root, "link", "file.txt"))).rejects.toThrow();
+  });
+});
