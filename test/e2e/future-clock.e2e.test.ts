@@ -2,10 +2,12 @@
 // and shares D:\future-sandbox, so tests must run sequentially (bun runs one file's tests in order).
 import { describe, expect, test } from "bun:test";
 import {
+  ROUTER_SENTINEL,
   TEST_TIMEOUT_MS,
   hasDateShapedYear,
   hasYearToken,
   isShellTool,
+  loadL3,
   loadSentinels,
   readAllDumpText,
   readToolResults,
@@ -64,6 +66,21 @@ function expectShiftedTodayLine(body: Dump): void {
   expect(hasYearToken(line ?? "", realYear())).toBe(false);
 }
 
+/** Oracle: the context/tool hooks shifted everything before the wire boundary (L3 changed nothing). */
+async function expectL3Untouched(bodies: Dump[]): Promise<void> {
+  for (const body of bodies) {
+    const l3 = await loadL3(body);
+    expect(l3.changed).toBe(0);
+  }
+}
+
+function expectShiftedAnswer(s: Scenario): void {
+  expect(hasYearToken(responseText(s), shiftedYear())).toBe(true);
+  expect(hasYearToken(responseText(s), realYear())).toBe(false);
+}
+
+const ROUTER_ROLE_NAMES: readonly string[] = ["explorer", "implementer", "reviewer", "researcher", "architect", "runner"];
+
 function lastBody(bodies: Dump[]): Dump {
   const last = bodies[bodies.length - 1];
   if (last === undefined) throw new Error("no primary dump");
@@ -86,6 +103,15 @@ describe.skipIf(process.env["FUTURE_E2E"] !== "1")("future-clock e2e", () => {
       const raw = await readAllDumpText(s.run.dumps);
       for (const sentinel of sentinels) expect(raw.includes(sentinel)).toBe(false);
       for (const body of s.bodies) expect(systemText(body).includes("Sisyphus")).toBe(false);
+      expect(raw.includes(ROUTER_SENTINEL)).toBe(false);
+      for (const body of s.bodies) {
+        for (const tool of toolDescriptions(body)) {
+          if (tool.name !== "subagent") continue;
+          for (const role of ROUTER_ROLE_NAMES) {
+            expect(new RegExp(`\\b${role}\\b`, "i").test(tool.description)).toBe(false);
+          }
+        }
+      }
       expectNoRealYearInPrompts(s.bodies);
       await expectNoSecrets(s);
     },
@@ -105,6 +131,7 @@ describe.skipIf(process.env["FUTURE_E2E"] !== "1")("future-clock e2e", () => {
       expectProduced(s);
       for (const body of s.bodies) expectShiftedTodayLine(body);
       expect(responseText(s).includes(String(shiftedYear()))).toBe(true);
+      await expectL3Untouched(s.bodies);
       expectNoRealYearInPrompts(s.bodies);
       await expectNoSecrets(s);
     },
@@ -136,6 +163,8 @@ describe.skipIf(process.env["FUTURE_E2E"] !== "1")("future-clock e2e", () => {
       const reads = readToolResults(last);
       expect(reads.length).toBeGreaterThan(0);
       expect(reads.some((text) => text.includes("2026-10-12"))).toBe(true);
+      expectShiftedAnswer(s);
+      await expectL3Untouched(s.bodies);
       expectNoRealYearInPrompts(s.bodies);
       await expectNoSecrets(s);
     },
@@ -172,7 +201,8 @@ describe.skipIf(process.env["FUTURE_E2E"] !== "1")("future-clock e2e", () => {
       expectProduced(s);
       const sessions = new Set(s.bodies.map((b) => b.sessionID));
       expect(sessions.size).toBeGreaterThanOrEqual(2);
-      const parent = s.run.sessionIDs[0];
+      const parent = s.run.parentSessionID;
+      expect(parent).toBeDefined();
       const children = s.bodies.filter((b) => b.sessionID !== parent);
       expect(children.length).toBeGreaterThan(0);
       for (const body of children) expectShiftedTodayLine(body);
@@ -184,6 +214,8 @@ describe.skipIf(process.env["FUTURE_E2E"] !== "1")("future-clock e2e", () => {
         expect(hasYearToken(result.text, shiftedYear())).toBe(true);
         expect(hasYearToken(result.text, realYear())).toBe(false);
       }
+      expectShiftedAnswer(s);
+      await expectL3Untouched(s.bodies);
       expectNoRealYearInPrompts(s.bodies);
       await expectNoSecrets(s);
     },
@@ -203,17 +235,41 @@ describe.skipIf(process.env["FUTURE_E2E"] !== "1")("future-clock e2e", () => {
   );
 
   test(
-    "E6 coexists with the real global config",
+    "E6 coexists with the real global config and the model router",
     async () => {
-      const s = await runScenario({ name: "e6", arm: "treatment", prompt: DATE_PROMPT, isolated: false });
+      const s = await runWithRetry(
+        () =>
+          runScenario({
+            name: "e6",
+            arm: "treatment",
+            prompt:
+              "Use a ferramenta subagent para que um subagente rode Get-Date no shell e me devolva a saída exata; depois diga que dia é hoje.",
+            isolated: false,
+            printLogs: true,
+          }),
+        (r) => calledTool(r, (t) => t.toLowerCase() === "subagent") && r.bodies.length > 0,
+      );
       expectProduced(s);
       const { sentinels } = await loadSentinels();
       expect(sentinels.length).toBeGreaterThan(0);
       const system = s.bodies.map(systemText).join("\n");
       expect(sentinels.some((sentinel) => system.includes(sentinel))).toBe(true);
+      for (const body of s.bodies) expect(systemText(body).includes(ROUTER_SENTINEL)).toBe(true);
+      expect(new Set(s.bodies.map((b) => b.sessionID)).size).toBeGreaterThanOrEqual(2);
+      const parent = s.run.parentSessionID;
+      expect(parent).toBeDefined();
+      const children = s.bodies.filter((b) => b.sessionID !== parent);
+      expect(children.length).toBeGreaterThan(0);
+      for (const body of children) expectShiftedTodayLine(body);
       expectNoRealYearInPrompts(s.bodies);
-      expect(hasYearToken(responseText(s), shiftedYear())).toBe(true);
-      expect(s.run.stderr.includes("[future-clock]")).toBe(false);
+      for (const body of s.bodies) {
+        for (const result of shellToolResults(body).filter((r) => CLOCK_COMMAND.test(r.command))) {
+          expect(hasYearToken(result.text, realYear())).toBe(false);
+        }
+      }
+      const failed = s.run.stderr.split(/\r?\n/).filter((line) => line.includes("[future-clock]") && /failed/i.test(line));
+      expect(failed).toEqual([]);
+      expect(s.run.stderr.includes("loading plugin")).toBe(true);
       await expectNoSecrets(s);
     },
     TEST_TIMEOUT_MS,

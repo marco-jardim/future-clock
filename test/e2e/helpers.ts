@@ -14,6 +14,9 @@ export const SHIFT_YEARS = 120;
 export const RUN_TIMEOUT_MS = 170_000;
 export const TEST_TIMEOUT_MS = 600_000;
 
+/** Text injected by opencode-model-router's source; absent from every AGENTS.md/CLAUDE.md. */
+export const ROUTER_SENTINEL = "Role Delegation Protocol";
+
 const SHELL_TOOLS: ReadonlySet<string> = new Set(["shell", "bash", "powershell"]);
 /** Primary dumps are every kind except the title-generation request. */
 const IGNORED_KIND = "title";
@@ -52,6 +55,14 @@ export interface ShellResult {
 export interface Sentinels {
   source: string;
   sentinels: string[];
+}
+
+/** Side file `<dump>.l3.json`: what the wire-boundary (L3) pass still had to change. */
+export interface L3Info {
+  changed: number;
+  applied: unknown;
+  origin: unknown;
+  kind: unknown;
 }
 
 export interface Scenario {
@@ -174,6 +185,16 @@ export async function loadBodies(dumps: string[]): Promise<Dump[]> {
   return out.sort((a, b) => a.seq - b.seq || a.file.localeCompare(b.file));
 }
 
+/** Reads the `.l3.json` side file that sits next to a primary dump. */
+export async function loadL3(body: Dump): Promise<L3Info> {
+  const file = body.file.replace(/\.json$/, ".l3.json");
+  const raw: unknown = JSON.parse(await readFile(file, "utf8"));
+  if (!isRecord(raw) || typeof raw["changed"] !== "number") {
+    throw new Error(`l3 side file lacks a numeric "changed": ${file}`);
+  }
+  return { changed: raw["changed"], applied: raw["applied"], origin: raw["origin"], kind: raw["kind"] };
+}
+
 /** Raw text of every dump file (including title and side files), for secret/sentinel scans. */
 export async function readAllDumpText(dumps: string[]): Promise<string> {
   const parts = await Promise.all(dumps.map((file) => readFile(file, "utf8")));
@@ -279,6 +300,8 @@ export interface ScenarioOptions {
   arm: Arm;
   prompt: string;
   isolated: boolean;
+  /** Surface plugin console output in stderr (opencode --print-logs). */
+  printLogs?: boolean;
 }
 
 /** Recreates the sandbox, runs one prompt with a fresh dump dir and parses the primary bodies. */
@@ -289,6 +312,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Scenario> {
     cwd,
     prompt: o.prompt,
     isolated: o.isolated,
+    printLogs: o.printLogs === true,
     dumpDir,
     timeoutMs: RUN_TIMEOUT_MS,
   });
