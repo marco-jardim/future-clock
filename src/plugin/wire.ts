@@ -125,6 +125,27 @@ function contentTexts(content: unknown): string[] {
   return texts;
 }
 
+/** Message roles that never occur in Anthropic Messages (OpenAI Chat and similar). */
+const FOREIGN_ROLES: ReadonlySet<string> = new Set(["system", "tool", "developer"]);
+
+function hasForeignRole(messages: unknown[]): boolean {
+  return messages.some(
+    (message) => isObject(message) && typeof message.role === "string" && FOREIGN_ROLES.has(message.role),
+  );
+}
+
+/**
+ * Strict Anthropic Messages shape: an object with a `messages` array, no message
+ * with role "system", "tool" or "developer", and a top-level `system` that is a
+ * string, an array, or absent. Anything else (e.g. OpenAI Chat) is unknown.
+ */
+function isAnthropicMessages(body: unknown): body is JsonObject & { messages: unknown[] } {
+  if (!isObject(body) || !Array.isArray(body.messages)) return false;
+  if (hasForeignRole(body.messages)) return false;
+  const system = body.system;
+  return system === undefined || typeof system === "string" || Array.isArray(system);
+}
+
 /**
  * Read-only view of every shell `tool_result` text in an Anthropic Messages
  * body, paired with the command of its `tool_use` (same matching as the
@@ -132,7 +153,7 @@ function contentTexts(content: unknown): string[] {
  */
 export function shellToolResults(body: unknown): Array<{ command: string; text: string }> {
   const results: Array<{ command: string; text: string }> = [];
-  if (!isObject(body) || !Array.isArray(body.messages)) return results;
+  if (!isAnthropicMessages(body)) return results;
   const shellCommands = new Map<string, string>();
   for (const message of body.messages) {
     if (!isObject(message) || !Array.isArray(message.content)) continue;
@@ -152,17 +173,18 @@ export function shellToolResults(body: unknown): Array<{ command: string; text: 
 
 /**
  * Rewrites an Anthropic Messages body. Returns `undefined` for an unknown shape
- * (not an object with a `messages` array); otherwise the rewritten deep clone and
- * the number of strings that actually changed.
+ * (see `isAnthropicMessages`: e.g. an OpenAI Chat body with a role "system"
+ * message); otherwise the rewritten deep clone and the number of strings that
+ * actually changed.
  */
 export function rewriteAnthropicBody(
   body: unknown,
   fns: RewriteFns,
 ): { body: unknown; changed: number } | undefined {
-  if (!isObject(body) || !Array.isArray(body.messages)) return undefined;
+  if (!isAnthropicMessages(body)) return undefined;
 
   const clone: unknown = structuredClone(body);
-  if (!isObject(clone) || !Array.isArray(clone.messages)) return undefined;
+  if (!isAnthropicMessages(clone)) return undefined;
 
   const counter: Counter = { changed: 0 };
   rewriteContent(clone, "system", (text) => fns.context(text), counter);

@@ -162,3 +162,34 @@ export const wireBody: WireBody = {
 export function makeWireBody(): WireBody {
   return structuredClone(wireBody);
 }
+
+/** Message role used by OpenAI Chat-like APIs, never by Anthropic Messages. */
+export type ForeignRole = "system" | "tool" | "developer";
+
+export interface OpenAiChatMessage {
+  role: ForeignRole | "user" | "assistant";
+  content: string;
+  tool_call_id?: string;
+}
+
+export interface OpenAiChatBody {
+  model: string;
+  messages: OpenAiChatMessage[];
+  stream: boolean;
+}
+
+/**
+ * OpenAI Chat-like body (not Anthropic Messages): the system prompt is a
+ * role "system" message, so it must be treated as an unknown shape (m7).
+ */
+export function makeOpenAiChatBody(foreignRole: ForeignRole = "system"): OpenAiChatBody {
+  const foreign: OpenAiChatMessage =
+    foreignRole === "tool"
+      ? { role: "tool", tool_call_id: "call_01", content: PT_BR_GET_DATE_OUTPUT }
+      : { role: foreignRole, content: "Today's date: Mon Oct 12 2026" };
+  return {
+    model: "gpt-5",
+    messages: [foreign, { role: "user", content: "Today's date is now: Tue Oct 13 2026" }],
+    stream: true,
+  };
+}

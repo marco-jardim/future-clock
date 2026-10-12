@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { createBoundaryHook, type BoundaryHookDeps } from "../../../src/plugin/boundary-hook";
 import type { HttpRequestEvent } from "../../../src/plugin/ports";
 import {
+  makeOpenAiChatBody,
   makeWireBody,
   PT_BR_GET_DATE_OUTPUT,
   READ_OUTPUT,
@@ -21,7 +22,10 @@ const YEARS = 120;
 const REAL_YEAR = 2026;
 const BRIDGE_URL = "http://127.0.0.1:51234/v1/messages?beta=true";
 const BRIDGE_ORIGIN = "http://127.0.0.1:51234";
-const SECRET = "Bearer sk-ant-abcdefghijklmnopqrstuvwxyz0123";
+/** Fake API key, built at runtime so no secret-looking literal is versioned (D13). */
+const FAKE_KEY = ["sk", "ant", "x".repeat(24)].join("-");
+const KEY_PREFIX = ["sk", "ant", ""].join("-");
+const SECRET = `Bearer ${FAKE_KEY}`;
 const TICKET = "ticket-7f3e9a1c-bridge";
 
 interface LogEntry {
@@ -267,6 +271,77 @@ describe("createBoundaryHook", () => {
     expect(entries[0]?.message).toContain("unknown shape");
   });
 
+  test("leaves an OpenAI-chat-like body (role 'system' message) untouched and warns unknown shape once (m7)", async () => {
+    const { hook, entries } = makeHook();
+    const text = JSON.stringify({
+      model: "gpt-5",
+      messages: [
+        { role: "system", content: "Today's date: Mon Oct 12 2026" },
+        { role: "user", content: "Today's date is now: Tue Oct 13 2026" },
+      ],
+    });
+    const event = makeEvent(text);
+    const original = event.request;
+
+    await hook(event);
+    await hook(makeEvent(text));
+
+    expect(event.request).toBe(original);
+    expect(await event.request.clone().text()).toBe(text);
+    expect(entries.map((entry) => entry.level)).toEqual(["warn"]);
+    expect(entries[0]?.message).toContain("unknown shape");
+  });
+
+  for (const role of ["system", "tool", "developer"] as const) {
+    test(`a message with role '${role}' makes the body an unknown shape, even with a top-level system (m7)`, async () => {
+      const { hook, entries } = makeHook();
+      const body = { system: "Today's date: Mon Oct 12 2026", ...makeOpenAiChatBody(role) };
+      const text = JSON.stringify(body);
+      const event = makeEvent(text);
+      const original = event.request;
+
+      await hook(event);
+
+      expect(event.request).toBe(original);
+      expect(await event.request.clone().text()).toBe(text);
+      expect(entries.map((entry) => entry.message)).toEqual([expect.stringContaining("unknown shape")]);
+    });
+  }
+
+  test("a top-level system that is neither string nor array is an unknown shape (m7)", async () => {
+    const { hook, entries } = makeHook();
+    const text = JSON.stringify({
+      system: { text: "Today's date: Mon Oct 12 2026" },
+      messages: [{ role: "user", content: "Today's date is now: Tue Oct 13 2026" }],
+    });
+    const event = makeEvent(text);
+    const original = event.request;
+
+    await hook(event);
+
+    expect(event.request).toBe(original);
+    expect(entries.map((entry) => entry.message)).toEqual([expect.stringContaining("unknown shape")]);
+  });
+
+  test("an Anthropic body without system is still handled (m7)", async () => {
+    const { hook, entries } = makeHook();
+    const body: Partial<WireBody> = makeWireBody();
+    delete body.system;
+    const event = makeEvent(JSON.stringify(body));
+    const original = event.request;
+
+    await hook(event);
+
+    expect(event.request).not.toBe(original);
+    const expected: Partial<WireBody> = expectedShiftedBody();
+    delete expected.system;
+    const sent = await event.request.clone().text();
+    expect(sent).toBe(JSON.stringify(expected));
+    expect(sent).toContain("current year is 2146");
+    expect(sent).toContain("Today's date is now: Tue Oct 13 2146");
+    expect(entries).toEqual([]);
+  });
+
   test("leaves a non-JSON body untouched and warns", async () => {
     const { hook, entries } = makeHook();
     const text = "Today's date: Mon Oct 12 2026 (not json)";
@@ -296,7 +371,7 @@ describe("createBoundaryHook", () => {
     expect(notJsonMessage).toContain("not JSON");
     expect(notJsonMessage).toContain(`(${byteLength} bytes)`);
     expect(notJsonMessage).not.toContain("Bearer");
-    expect(notJsonMessage).not.toContain("sk-ant");
+    expect(notJsonMessage).not.toContain(KEY_PREFIX);
     expect(notJsonMessage).not.toContain("Today");
     expect(entries[1]?.message).toContain("unknown shape");
   });
@@ -459,7 +534,7 @@ describe("createBoundaryHook", () => {
     expect(files.length).toBe(2);
     for (const name of files) {
       const content = await readFile(join(dir, name), "utf8");
-      expect(content).not.toContain("sk-ant-");
+      expect(content).not.toContain(KEY_PREFIX);
       expect(content).not.toContain(TICKET);
       expect(content.toLowerCase()).not.toContain("authorization");
       expect(content).not.toContain("/v1/messages");
