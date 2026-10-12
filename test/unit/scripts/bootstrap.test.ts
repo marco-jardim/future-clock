@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildAddArgs, buildCommitArgs, validateMessage } from "../../../scripts/git/commit";
-import { artifactPath, ARTIFACTS, assertUnder } from "../../../scripts/lib/artifacts";
+import { artifactPath, ARTIFACTS, assertUnder, writeIsolatedConfig } from "../../../scripts/lib/artifacts";
 
 describe("commit.ts helpers", () => {
   test("validateMessage accepts valid conventional headers", () => {
@@ -67,6 +67,34 @@ describe("commit.ts helpers", () => {
 describe("artifacts", () => {
   test("artifactPath joins under ARTIFACTS", () => {
     expect(artifactPath("state", "x.json")).toBe(join(ARTIFACTS, "state", "x.json"));
+  });
+});
+
+describe("writeIsolatedConfig", () => {
+  let base: string;
+
+  beforeAll(async () => {
+    base = await realpath(await mkdtemp(join(tmpdir(), "fc-isocfg-")));
+  });
+
+  afterAll(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  test("creates <dir>\\opencode\\opencode.json with exactly {}", async () => {
+    const xdg = join(base, "fresh");
+    const file = await writeIsolatedConfig(xdg);
+    expect(file).toBe(join(xdg, "opencode", "opencode.json"));
+    expect(await readFile(file, "utf8")).toBe("{}");
+  });
+
+  test("overwrites a leftover config (e.g. a probe plugin) with {}", async () => {
+    const xdg = join(base, "stale");
+    await mkdir(join(xdg, "opencode"), { recursive: true });
+    const file = join(xdg, "opencode", "opencode.json");
+    await writeFile(file, JSON.stringify({ plugin: ["D:\\future-probe\\probe.ts"] }));
+    expect(await writeIsolatedConfig(xdg)).toBe(file);
+    expect(await readFile(file, "utf8")).toBe("{}");
   });
 });
 

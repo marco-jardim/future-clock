@@ -1,6 +1,6 @@
 // Recreates the isolated sandbox D:\future-sandbox (treatment = plugin enabled, control = no plugins).
 // Usage: bun scripts/sandbox.ts [treatment|control]
-import { lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join, win32 } from "node:path";
 import { SANDBOX, ensureIsolationDirs } from "./lib/artifacts";
 import { DEFAULT_MODEL } from "./lib/opencode-run";
@@ -59,11 +59,22 @@ async function removeWithRetry(dir: string): Promise<void> {
   }
 }
 
-async function refuseLink(dir: string): Promise<void> {
+/**
+ * Throws if `dir` is a link/junction, or if its real path differs from `dir` (case-insensitive) —
+ * i.e. a reparse point/junction anywhere in the chain. A missing `dir` is fine (nothing to delete).
+ */
+export async function refuseLink(dir: string): Promise<void> {
+  let isLink: boolean;
   try {
-    if ((await lstat(dir)).isSymbolicLink()) throw new Error(`refusing: ${dir} is a link/junction`);
+    isLink = (await lstat(dir)).isSymbolicLink();
   } catch (e) {
-    if (errorCode(e) !== "ENOENT") throw e;
+    if (errorCode(e) === "ENOENT") return;
+    throw e;
+  }
+  if (isLink) throw new Error(`refusing: ${dir} is a link/junction`);
+  const real = await realpath(dir);
+  if (win32.resolve(real).toLowerCase() !== win32.resolve(dir).toLowerCase()) {
+    throw new Error(`refusing: ${dir} resolves elsewhere (${real})`);
   }
 }
 

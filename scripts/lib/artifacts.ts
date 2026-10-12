@@ -28,15 +28,21 @@ export function isolationEnv(): Record<string, string> {
   return { XDG_CONFIG_HOME: ISOLATION_XDG_CONFIG };
 }
 
-/** Creates <xdg-config>\opencode\opencode.json = "{}" if missing. */
-export async function ensureIsolationDirs(): Promise<void> {
-  const dir = join(ISOLATION_XDG_CONFIG, "opencode");
+/**
+ * (Re)writes <xdgConfigDir>\opencode\opencode.json with exactly "{}" — always overwriting, so a
+ * leftover config (e.g. a probe plugin) can never stay active. Returns the file path.
+ */
+export async function writeIsolatedConfig(xdgConfigDir: string): Promise<string> {
+  const dir = join(xdgConfigDir, "opencode");
   await mkdir(dir, { recursive: true });
-  try {
-    await writeFile(join(dir, "opencode.json"), "{}", { flag: "wx" });
-  } catch (e) {
-    if (errorCode(e) !== "EEXIST") throw e;
-  }
+  const file = join(dir, "opencode.json");
+  await writeFile(file, "{}");
+  return file;
+}
+
+/** Resets the isolated global config (ISOLATION_XDG_CONFIG) to "{}". */
+export async function ensureIsolationDirs(): Promise<void> {
+  await writeIsolatedConfig(ISOLATION_XDG_CONFIG);
 }
 
 function errorCode(e: unknown): unknown {

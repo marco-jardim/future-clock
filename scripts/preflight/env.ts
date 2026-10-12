@@ -328,15 +328,28 @@ interface SentinelCapture {
   sentinels: string[];
 }
 
+/** Instruction files the user's global setup may inject (outside the scanned dirs below). */
+function homeSentinelFiles(): string[] {
+  return [join(homedir(), "AGENTS.md")];
+}
+
+/** Fixed router markers looked for in run transcripts, independent of the scanned files. */
+const ROUTER_SENTINELS: readonly string[] = ["Role Delegation Protocol"];
+
 async function captureSentinels(configDir: string | null): Promise<SentinelCapture> {
   const candidates: string[] = [];
   candidates.push(configDir ?? join(homedir(), ".config", "opencode"));
   candidates.push(join(homedir(), ".config", "Claude"));
+  candidates.push(join(homedir(), ".claude"));
   const dirs: Array<{ dir: string; exists: boolean }> = [];
   for (const dir of candidates) dirs.push({ dir, exists: (await pathKind(dir)) === "dir" });
 
   const files: SentinelFile[] = [];
   const configs: PluginConfigInfo[] = [];
+  for (const full of homeSentinelFiles()) {
+    if ((await pathKind(full)) !== "file") continue;
+    files.push({ file: full, sentinels: pickSentinels(await readFile(full, "utf8")) });
+  }
   for (const { dir, exists } of dirs) {
     if (!exists) continue;
     const names = await readdir(dir);
@@ -698,7 +711,11 @@ async function main(): Promise<void> {
       sentinelCap.configs.map((c) => c.file).join("; ") || "(no opencode config found)"
     }`;
     await capture("sentinels-write", () =>
-      writeFile(sentinelsFile, `${JSON.stringify({ source, sentinels: sentinelCap.sentinels }, null, 2)}\n`, "utf8"),
+      writeFile(
+        sentinelsFile,
+        `${JSON.stringify({ source, sentinels: sentinelCap.sentinels, routerSentinels: [...ROUTER_SENTINELS] }, null, 2)}\n`,
+        "utf8",
+      ),
     );
   }
 

@@ -1,8 +1,19 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ISOLATION_XDG_CONFIG, SANDBOX } from "../../../scripts/lib/artifacts";
 import { runEnv } from "../../../scripts/lib/isolation";
-import { buildArgv, parseRunOutput } from "../../../scripts/lib/opencode-run";
-import { PLUGIN_DIR, assertIsSandbox, sandboxConfig } from "../../../scripts/sandbox";
+import {
+  type VersionSpawner,
+  buildArgv,
+  clearOpencodeVersionCache,
+  getOpencodeVersion,
+  parseRunOutput,
+  sessionIDsFromDumps,
+  unionIDs,
+} from "../../../scripts/lib/opencode-run";
+import { PLUGIN_DIR, assertIsSandbox, refuseLink, sandboxConfig } from "../../../scripts/sandbox";
 
 const SAMPLE_JSONL = [
   '{"type":"step_start","timestamp":1,"sessionID":"ses_abc","part":{"type":"step-start"}}',
@@ -27,6 +38,67 @@ describe("buildArgv", () => {
       "m/x",
       "Que dia é hoje?",
     ]);
+  });
+
+  test("printLogs adds --print-logs --log-level warn right after --standalone", () => {
+    expect(buildArgv("m/x", "p", "C:\\bin\\opencode.exe", true)).toEqual([
+      "C:\\bin\\opencode.exe",
+      "run",
+      "--standalone",
+      "--print-logs",
+      "--log-level",
+      "warn",
+      "--auto",
+      "--format",
+      "json",
+      "-m",
+      "m/x",
+      "p",
+    ]);
+    expect(buildArgv("m/x", "p", "o", false)).not.toContain("--print-logs");
+  });
+});
+
+describe("session IDs", () => {
+  test("sessionIDsFromDumps parses ses_<id>-<kind>-<n>.json names only, unique, in order", () => {
+    const dir = "C:\\tmp\\dumps";
+    expect(
+      sessionIDsFromDumps([
+        join(dir, "ses_parent1-system-1.json"),
+        join(dir, "ses_child2-messages-3.json"),
+        join(dir, "ses_parent1-messages-2.json"),
+        join(dir, "notes.txt"),
+        join(dir, "ses_bad-Upper-1.json"),
+        join(dir, "ses_x-system-1.json.bak"),
+        join(dir, "xses_y-system-1.json"),
+      ]),
+    ).toEqual(["ses_parent1", "ses_child2"]);
+  });
+
+  test("unionIDs keeps stdout order first and adds child sessions from dumps", () => {
+    expect(unionIDs(["ses_parent1"], ["ses_parent1", "ses_child2"])).toEqual(["ses_parent1", "ses_child2"]);
+    expect(unionIDs([], [])).toEqual([]);
+  });
+});
+
+describe("getOpencodeVersion", () => {
+  afterEach(() => clearOpencodeVersionCache());
+
+  test("a failed lookup is not cached; a successful one is", async () => {
+    clearOpencodeVersionCache();
+    let calls = 0;
+    const failing: VersionSpawner = () => {
+      calls += 1;
+      return Promise.reject(new Error("spawn failed"));
+    };
+    const ok: VersionSpawner = () => {
+      calls += 1;
+      return Promise.resolve("1.2.3");
+    };
+    await expect(getOpencodeVersion("C:\\bin\\opencode.exe", failing)).rejects.toThrow("spawn failed");
+    expect(await getOpencodeVersion("C:\\bin\\opencode.exe", ok)).toBe("1.2.3");
+    expect(await getOpencodeVersion("C:\\bin\\opencode.exe", failing)).toBe("1.2.3");
+    expect(calls).toBe(2);
   });
 });
 
@@ -144,5 +216,39 @@ describe("sandbox", () => {
     });
     expect(sandboxConfig({ arm: "control", model: "m/y" })["plugins"]).toEqual([]);
     expect(PLUGIN_DIR.toLowerCase()).toBe("d:\\git\\future-agents\\dist\\future-clock");
+  });
+});
+
+describe("refuseLink", () => {
+  let base: string;
+  let real: string;
+  let jn: string;
+
+  beforeAll(async () => {
+    base = await realpath(await mkdtemp(join(tmpdir(), "fc-refuse-")));
+    real = join(base, "real");
+    jn = join(base, "jn");
+    await mkdir(join(real, "sub"), { recursive: true });
+    await symlink(real, jn, "junction");
+  });
+
+  afterAll(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  test("accepts a plain directory (any case on win32) and a missing one", async () => {
+    await expect(refuseLink(join(real, "sub"))).resolves.toBeUndefined();
+    if (process.platform === "win32") {
+      await expect(refuseLink(join(real, "sub").toUpperCase())).resolves.toBeUndefined();
+    }
+    await expect(refuseLink(join(base, "missing"))).resolves.toBeUndefined();
+  });
+
+  test("rejects the junction itself", async () => {
+    await expect(refuseLink(jn)).rejects.toThrow("refusing");
+  });
+
+  test("rejects a directory reached through a junction higher in the chain", async () => {
+    await expect(refuseLink(join(jn, "sub"))).rejects.toThrow("resolves elsewhere");
   });
 });

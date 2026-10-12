@@ -14,6 +14,8 @@ export interface RunOptions {
   dumpDir: string;
   model?: string;
   timeoutMs?: number;
+  /** Adds `--print-logs --log-level warn` so opencode's warnings/errors land in stderr. */
+  printLogs?: boolean;
 }
 
 export interface RunResult {
@@ -24,12 +26,32 @@ export interface RunResult {
   texts: string[];
   toolCalls: Array<{ tool: string; input: unknown; output?: string }>;
   errors: string[];
+  /** First sessionID seen in stdout (the top-level session of the run). */
+  parentSessionID: string | undefined;
+  /** Unique union of stdout sessionIDs and those parsed from dump filenames (includes child sessions). */
   sessionIDs: string[];
   dumps: string[];
   opencodeVersion: string;
 }
 
 type ParsedOutput = Pick<RunResult, "texts" | "toolCalls" | "errors" | "sessionIDs">;
+
+const DUMP_NAME_RE = /^(ses_[A-Za-z0-9]+)-[a-z]+-\d+\.json$/;
+
+/** Session IDs from dump file names (`ses_<id>-<kind>-<n>.json`), in first-seen order, unique. */
+export function sessionIDsFromDumps(dumpPaths: readonly string[]): string[] {
+  const ids: string[] = [];
+  for (const p of dumpPaths) {
+    const id = DUMP_NAME_RE.exec(win32.basename(p))?.[1];
+    if (id !== undefined && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+/** Unique union, preserving first-seen order. */
+export function unionIDs(...lists: ReadonlyArray<readonly string[]>): string[] {
+  return [...new Set(lists.flat())];
+}
 type ToolCall = RunResult["toolCalls"][number];
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -68,9 +90,10 @@ function toolCall(part: Record<string, unknown>): ToolCall | undefined {
   return call;
 }
 
-/** Argv for a run: always --standalone (service mode is not isolated). */
-export function buildArgv(model: string, prompt: string, opencodePath: string): string[] {
-  return [opencodePath, "run", "--standalone", "--auto", "--format", "json", "-m", model, prompt];
+/** Argv for a run: always --standalone (service mode is not isolated); printLogs adds warn-level logs on stderr. */
+export function buildArgv(model: string, prompt: string, opencodePath: string, printLogs = false): string[] {
+  const logs = printLogs ? ["--print-logs", "--log-level", "warn"] : [];
+  return [opencodePath, "run", "--standalone", ...logs, "--auto", "--format", "json", "-m", model, prompt];
 }
 
 /** Parses opencode's JSONL stdout; non-JSON or unknown lines are skipped. */
@@ -111,21 +134,43 @@ function findOpencode(): string {
   return path;
 }
 
+/** Produces the version string for an opencode binary (injectable for tests). */
+export type VersionSpawner = (opencodePath: string) => Promise<string>;
+
+async function spawnVersion(opencodePath: string): Promise<string> {
+  const proc = Bun.spawn([opencodePath, "--version"], { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  if (code !== 0) throw new Error(`opencode --version failed (${code}): ${stderr.slice(0, 300)}`);
+  return stdout.trim();
+}
+
 let versionCache: Promise<string> | undefined;
 
-/** `opencode --version`, cached per process. */
-export function getOpencodeVersion(opencodePath: string = findOpencode()): Promise<string> {
-  versionCache ??= (async () => {
-    const proc = Bun.spawn([opencodePath, "--version"], { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-    if (code !== 0) throw new Error(`opencode --version failed (${code}): ${stderr.slice(0, 300)}`);
-    return stdout.trim();
-  })();
-  return versionCache;
+/** Drops the cached version (tests). */
+export function clearOpencodeVersionCache(): void {
+  versionCache = undefined;
+}
+
+/**
+ * `opencode --version`, cached per process. A failed lookup is not cached: the cache is cleared
+ * when the pending promise rejects, so the next call retries.
+ */
+export function getOpencodeVersion(
+  opencodePath: string = findOpencode(),
+  spawner: VersionSpawner = spawnVersion,
+): Promise<string> {
+  if (versionCache !== undefined) return versionCache;
+  const pending = spawner(opencodePath);
+  versionCache = pending;
+  // Registered before the caller's handlers, so the reset happens before the caller sees the rejection.
+  pending.catch(() => {
+    if (versionCache === pending) versionCache = undefined;
+  });
+  return pending;
 }
 
 function isInsideOrEqual(root: string, target: string): boolean {
@@ -158,7 +203,7 @@ export async function runOpencode(o: RunOptions): Promise<RunResult> {
 
   const opencode = findOpencode();
   const opencodeVersion = await getOpencodeVersion(opencode);
-  const argv = buildArgv(o.model ?? DEFAULT_MODEL, o.prompt, opencode);
+  const argv = buildArgv(o.model ?? DEFAULT_MODEL, o.prompt, opencode, o.printLogs ?? false);
   const proc = Bun.spawn(argv, {
     cwd: o.cwd,
     env: runEnv({ isolated: o.isolated, dumpDir: o.dumpDir, cwd: o.cwd }),
@@ -178,7 +223,9 @@ export async function runOpencode(o: RunOptions): Promise<RunResult> {
   ]).finally(() => clearTimeout(timer));
 
   const parsed = parseRunOutput(stdout);
-  await recordSessions(parsed.sessionIDs);
   const dumps = await listDumps(o.dumpDir);
-  return { exitCode, timedOut, stdout, stderr, ...parsed, dumps, opencodeVersion };
+  const parentSessionID = parsed.sessionIDs[0];
+  const sessionIDs = unionIDs(parsed.sessionIDs, sessionIDsFromDumps(dumps));
+  await recordSessions(sessionIDs);
+  return { exitCode, timedOut, stdout, stderr, ...parsed, parentSessionID, sessionIDs, dumps, opencodeVersion };
 }
