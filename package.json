@@ -7,7 +7,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test ./test/unit",
     "check": "bun run typecheck && bun run test && bun run build",
-    "build": "bun build src/plugin/index.ts --outfile dist/future-clock.js --target bun --external @opencode/plugin --external effect",
+    "build": "bun scripts/build.ts",
     "test:e2e": "bun scripts/run-e2e.ts",
     "preflight": "bun scripts/preflight/env.ts",
     "probe": "bun scripts/probe/run-probe.ts",
