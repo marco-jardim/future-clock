@@ -9,7 +9,7 @@
 export interface RewriteFns {
   /** System prompt and tool descriptions (date-shaped spans). */
   context(text: string): string;
-  /** Conversation text: only "Today's date" lines are affected (fns decides). */
+  /** Non-assistant conversation text: only "Today's date is now:" rollover lines are affected (fns decides). */
   rolloverOnly(text: string): string;
   /** Output of a shell tool call; `command` is the command that produced it. */
   clock(command: string, text: string): string;
@@ -81,22 +81,28 @@ function recordToolUse(block: JsonObject, shellCommands: Map<string, string>): v
   shellCommands.set(block.id, command);
 }
 
+/**
+ * Conversation messages. Text of role "assistant" is never rewritten (D10/D-PF9:
+ * the model's own words stay verbatim); its `tool_use` blocks are still recorded
+ * so the matching shell `tool_result`s (role "user") can be classified.
+ */
 function rewriteMessages(messages: unknown[], fns: RewriteFns, counter: Counter): void {
   const shellCommands = new Map<string, string>();
   const rollover = (text: string): string => fns.rolloverOnly(text);
 
   for (const message of messages) {
     if (!isObject(message)) continue;
+    const isAssistant = message.role === "assistant";
     const content = message.content;
     if (typeof content === "string") {
-      rewriteField(message, "content", rollover, counter);
+      if (!isAssistant) rewriteField(message, "content", rollover, counter);
       continue;
     }
     if (!Array.isArray(content)) continue;
     for (const block of content) {
       if (!isObject(block)) continue;
       if (isTextBlock(block)) {
-        rewriteField(block, "text", rollover, counter);
+        if (!isAssistant) rewriteField(block, "text", rollover, counter);
       } else if (block.type === "tool_use") {
         recordToolUse(block, shellCommands);
       } else if (block.type === "tool_result" && typeof block.tool_use_id === "string") {
@@ -106,6 +112,42 @@ function rewriteMessages(messages: unknown[], fns: RewriteFns, counter: Counter)
       }
     }
   }
+}
+
+/** Text strings of a `tool_result` content (a string or an array of text blocks). */
+function contentTexts(content: unknown): string[] {
+  if (typeof content === "string") return [content];
+  if (!Array.isArray(content)) return [];
+  const texts: string[] = [];
+  for (const block of content) {
+    if (isTextBlock(block)) texts.push(block.text);
+  }
+  return texts;
+}
+
+/**
+ * Read-only view of every shell `tool_result` text in an Anthropic Messages
+ * body, paired with the command of its `tool_use` (same matching as the
+ * rewrite). Returns an empty list for an unknown shape. Never mutates `body`.
+ */
+export function shellToolResults(body: unknown): Array<{ command: string; text: string }> {
+  const results: Array<{ command: string; text: string }> = [];
+  if (!isObject(body) || !Array.isArray(body.messages)) return results;
+  const shellCommands = new Map<string, string>();
+  for (const message of body.messages) {
+    if (!isObject(message) || !Array.isArray(message.content)) continue;
+    for (const block of message.content) {
+      if (!isObject(block)) continue;
+      if (block.type === "tool_use") {
+        recordToolUse(block, shellCommands);
+      } else if (block.type === "tool_result" && typeof block.tool_use_id === "string") {
+        const command = shellCommands.get(block.tool_use_id);
+        if (command === undefined) continue;
+        for (const text of contentTexts(block.content)) results.push({ command, text });
+      }
+    }
+  }
+  return results;
 }
 
 /**

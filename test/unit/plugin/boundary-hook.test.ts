@@ -78,6 +78,64 @@ function streamOf(text: string): ReadableStream<Uint8Array> {
   });
 }
 
+/** POST with a streaming body and exactly the given headers (no implicit content-type). */
+function makeRawStreamEvent(text: string, headers: Record<string, string>): HttpRequestEvent {
+  const init: RequestInit & { duplex: "half" } = {
+    method: "POST",
+    headers: new Headers(headers),
+    body: streamOf(text),
+    duplex: "half",
+  };
+  return { sessionID: "ses_abc", kind: "chat", request: new Request(BRIDGE_URL, init) };
+}
+
+/** Minimal Anthropic body: plain "Today's date:" in user/assistant text, a rollover line in a user block. */
+function rolloverBodyText(userRolloverBlock: string): string {
+  return JSON.stringify({
+    model: "claude-haiku-5-5",
+    max_tokens: 1024,
+    messages: [
+      { role: "user", content: "Today's date: 2026-10-12. Plan my week." },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Today's date: Mon Oct 12 2026" },
+          { type: "text", text: "Today's date is now: Tue Oct 13 2026" },
+        ],
+      },
+      { role: "assistant", content: "Today's date is now: Tue Oct 13 2026" },
+      { role: "user", content: [{ type: "text", text: userRolloverBlock }] },
+    ],
+  });
+}
+
+/** Minimal Anthropic body with a classified (Get-Date) and an unclassified shell tool_result. */
+function clockToolResultBodyText(): string {
+  return JSON.stringify({
+    model: "claude-haiku-5-5",
+    max_tokens: 1024,
+    messages: [
+      { role: "user", content: "que dia é hoje?" },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "toolu_clock", name: "shell", input: { command: "Get-Date" } }],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "toolu_clock", content: PT_BR_GET_DATE_OUTPUT }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "toolu_list", name: "shell", input: { command: "Get-ChildItem" } }],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "toolu_list", content: "notes 12 Oct 2026.txt" }],
+      },
+    ],
+  });
+}
+
 /** The fixture as it must look after the final pass with years = 120. */
 function expectedShiftedBody(): WireBody {
   const body = makeWireBody();
@@ -223,6 +281,50 @@ describe("createBoundaryHook", () => {
     expect(entries[0]?.message).toContain("not JSON");
   });
 
+  test("not-JSON and unknown-shape warn under separate keys and never quote the body (N7)", async () => {
+    const { hook, entries } = makeHook();
+    const notJson = `${SECRET} Today's date: Mon Oct 12 2026 {`;
+    const byteLength = new TextEncoder().encode(notJson).byteLength;
+
+    await hook(makeEvent(notJson));
+    await hook(makeEvent(notJson));
+    await hook(makeEvent(JSON.stringify({ input: "x", model: "y" })));
+    await hook(makeEvent(JSON.stringify({ input: "x", model: "y" })));
+
+    expect(entries.map((entry) => entry.level)).toEqual(["warn", "warn"]);
+    const notJsonMessage = entries[0]?.message ?? "";
+    expect(notJsonMessage).toContain("not JSON");
+    expect(notJsonMessage).toContain(`(${byteLength} bytes)`);
+    expect(notJsonMessage).not.toContain("Bearer");
+    expect(notJsonMessage).not.toContain("sk-ant");
+    expect(notJsonMessage).not.toContain("Today");
+    expect(entries[1]?.message).toContain("unknown shape");
+  });
+
+  test("rewrites only 'Today's date is now:' lines of non-assistant messages (m2, D10)", async () => {
+    const { hook, entries } = makeHook();
+    const event = makeEvent(rolloverBodyText("x\nToday's date is now: Tue Oct 13 2026"));
+
+    await hook(event);
+
+    expect(await event.request.clone().text()).toBe(
+      rolloverBodyText("x\nToday's date is now: Tue Oct 13 2146"),
+    );
+    expect(entries).toEqual([]);
+  });
+
+  test("plain 'Today's date:' in user content and assistant text leaves the request untouched (m2)", async () => {
+    const { hook } = makeHook();
+    const text = rolloverBodyText("x\nno rollover here: Tue Oct 13 2026");
+    const event = makeEvent(text);
+    const original = event.request;
+
+    await hook(event);
+
+    expect(event.request).toBe(original);
+    expect(await event.request.clone().text()).toBe(text);
+  });
+
   test("skips non-POST requests and content-encoded bodies", async () => {
     const { hook, entries } = makeHook();
     const get = makeEvent(undefined, { method: "GET" });
@@ -247,6 +349,53 @@ describe("createBoundaryHook", () => {
 
     const bytes = await event.request.clone().arrayBuffer();
     expect(new TextDecoder().decode(bytes)).toBe(JSON.stringify(expectedShiftedBody()));
+  });
+
+  test("a streaming body that needs no change keeps the same request and readable bytes (m5)", async () => {
+    const { hook, entries } = makeHook();
+    const text = JSON.stringify(expectedShiftedBody());
+    const event = makeEvent(streamOf(text));
+    const original = event.request;
+
+    await hook(event);
+
+    expect(event.request).toBe(original);
+    const first = new Uint8Array(await event.request.clone().arrayBuffer());
+    const second = new Uint8Array(await event.request.clone().arrayBuffer());
+    expect(second).toEqual(first);
+    expect(new TextDecoder().decode(first)).toBe(text);
+    expect(entries).toEqual([]);
+  });
+
+  test("replacement body is binary: no implicit content-type, x-ticket kept (m4)", async () => {
+    const { hook } = makeHook();
+    const event = makeRawStreamEvent(JSON.stringify(makeWireBody()), { "x-ticket": TICKET });
+    const original = event.request;
+    expect(original.headers.get("content-type")).toBeNull();
+
+    await hook(event);
+
+    expect(event.request).not.toBe(original);
+    expect(event.request.headers.get("content-type")).toBeNull();
+    expect(event.request.headers.get("x-ticket")).toBe(TICKET);
+    expect(await event.request.clone().text()).toBe(JSON.stringify(expectedShiftedBody()));
+  });
+
+  test("replacement drops a copied transfer-encoding header (m4)", async () => {
+    const { hook } = makeHook();
+    const event = makeRawStreamEvent(JSON.stringify(makeWireBody()), {
+      "x-ticket": TICKET,
+      "transfer-encoding": "chunked",
+    });
+    const original = event.request;
+    expect(original.headers.get("transfer-encoding")).toBe("chunked");
+
+    await hook(event);
+
+    expect(event.request).not.toBe(original);
+    expect(event.request.headers.get("transfer-encoding")).toBeNull();
+    expect(event.request.headers.get("x-ticket")).toBe(TICKET);
+    expect(await event.request.clone().text()).toBe(JSON.stringify(expectedShiftedBody()));
   });
 
   test("preserves url, method and unknown headers; drops the stale content-length", async () => {
@@ -339,7 +488,7 @@ describe("createBoundaryHook", () => {
     expect(entries[0]?.message).toContain("dump write failed");
   });
 
-  test("detector warns once when a date-shaped real year survives in system or tool text", async () => {
+  test("detector warns once when a date-shaped real year survives in system, tool or shell text", async () => {
     const { hook, entries } = makeHook({ enabled: false });
 
     await hook(makeEvent(JSON.stringify(makeWireBody())));
@@ -349,7 +498,33 @@ describe("createBoundaryHook", () => {
     expect(warnings.map((entry) => entry.message)).toEqual([
       expect.stringContaining("real year 2026 still present in date-shaped text of system"),
       expect.stringContaining("real year 2026 still present in date-shaped text of tool:websearch"),
+      expect.stringContaining("real year 2026 still present in date-shaped text of tool_result"),
     ]);
+  });
+
+  test("detector scans classified shell tool_results and measures before/after the pass (N8)", async () => {
+    const disabled = makeHook({ enabled: false });
+    const event = makeEvent(clockToolResultBodyText());
+    const original = event.request;
+
+    await disabled.hook(event);
+    await disabled.hook(makeEvent(clockToolResultBodyText()));
+
+    expect(event.request).toBe(original);
+    expect(disabled.entries.map((entry) => entry.level)).toEqual(["warn"]);
+    const message = disabled.entries[0]?.message ?? "";
+    expect(message).toContain("real year 2026 still present in date-shaped text of tool_result");
+    expect(message).toContain("1 left, 1 before");
+    expect(message).toContain("enabled=false");
+
+    // Enabled: the real year is found before the pass but none survives in what is sent.
+    const enabled = makeHook();
+    const shifted = makeEvent(clockToolResultBodyText());
+    await enabled.hook(shifted);
+    const sent = await shifted.request.clone().text();
+    expect(sent).toContain("12 de outubro de 2146");
+    expect(sent).toContain("notes 12 Oct 2026.txt");
+    expect(enabled.entries).toEqual([]);
   });
 
   test("never throws: an internal failure is logged and the request is left untouched", async () => {
