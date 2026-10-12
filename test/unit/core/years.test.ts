@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { shiftYears, validateYears } from "../../../src/core/years";
+import { shiftRolloverLines, shiftYears, validateYears } from "../../../src/core/years";
 import type { Mode, ShiftResult } from "../../../src/core/types";
 
 const REAL_YEAR = 2026;
@@ -25,19 +25,22 @@ const FL_DATE = "\u001b[32;1mDate : \u001b[0m12/10/2026 00:00:00";
 const FL_YEAR = "Year : 2026";
 
 describe("validateYears", () => {
-  test("accepts integers with |years| >= 3 inside [1000, 9999]", () => {
+  test("accepts integers with years >= 4 or years <= -3 inside [1000, 9999]", () => {
     expect(validateYears(120, REAL_YEAR)).toBe(120);
     expect(validateYears(-120, REAL_YEAR)).toBe(-120);
-    expect(validateYears(3, REAL_YEAR)).toBe(3);
+    expect(validateYears(4, REAL_YEAR)).toBe(4);
     expect(validateYears(-3, REAL_YEAR)).toBe(-3);
     expect(validateYears(7972, REAL_YEAR)).toBe(7972); // 2027 + 7972 = 9999
     expect(validateYears(-1025, REAL_YEAR)).toBe(-1025); // 2025 - 1025 = 1000
   });
 
-  test("rejects non-integers, |years| < 3 and out-of-range results", () => {
-    expect(() => validateYears(0, REAL_YEAR)).toThrow(/\|years\| >= 3/);
-    expect(() => validateYears(1, REAL_YEAR)).toThrow(/\|years\| >= 3/);
-    expect(() => validateYears(-2, REAL_YEAR)).toThrow(/\|years\| >= 3/);
+  test("rejects non-integers, -3 < years < 4 and out-of-range results", () => {
+    const range = /years >= 4 or years <= -3/;
+    expect(() => validateYears(3, REAL_YEAR)).toThrow(range);
+    expect(() => validateYears(2, REAL_YEAR)).toThrow(range);
+    expect(() => validateYears(0, REAL_YEAR)).toThrow(range);
+    expect(() => validateYears(1, REAL_YEAR)).toThrow(range);
+    expect(() => validateYears(-2, REAL_YEAR)).toThrow(range);
     expect(() => validateYears(2.5, REAL_YEAR)).toThrow(/integer/);
     expect(() => validateYears("120", REAL_YEAR)).toThrow(/integer/);
     expect(() => validateYears(Number.NaN, REAL_YEAR)).toThrow(/integer/);
@@ -57,6 +60,35 @@ describe('shiftYears mode "context"', () => {
     expect(ctx("Today's date is now: Tue Oct 13 2026")).toEqual({
       text: "Today's date is now: Tue Oct 13 2146",
       count: 1,
+    });
+  });
+
+  test("Today's date line: only the date right after the colon changes (N1)", () => {
+    expect(ctx("Today's date: Mon Oct 12 2026 | protocol v2026")).toEqual({
+      text: "Today's date: Mon Oct 12 2146 | protocol v2026",
+      count: 1,
+    });
+    expect(ctx("Today's date: Mon Oct 12 2026 protocol v2026 build 2026")).toEqual({
+      text: "Today's date: Mon Oct 12 2146 protocol v2026 build 2026",
+      count: 1,
+    });
+    // a shape only this pattern covers ("yyyy/mm/dd"), followed by a non-date tail
+    expect(ctx("Today's date: 2026/10/12 (release 2026)")).toEqual({
+      text: "Today's date: 2146/10/12 (release 2026)",
+      count: 1,
+    });
+    expect(ctx("today\u2019s date is now: Tuesday, October 13th, 2026")).toEqual({
+      text: "today\u2019s date is now: Tuesday, October 13th, 2146",
+      count: 1,
+    });
+    expect(ctx("Today's date: segunda-feira, 12 de outubro de 2026")).toEqual({
+      text: "Today's date: segunda-feira, 12 de outubro de 2146",
+      count: 1,
+    });
+    // no date right after the colon: nothing on the line is date-shaped
+    expect(ctx("Today's date: see v2026 notes")).toEqual({
+      text: "Today's date: see v2026 notes",
+      count: 0,
     });
   });
 
@@ -86,6 +118,21 @@ describe('shiftYears mode "context"', () => {
     expect(ctx("2025-12-30")).toEqual({ text: "2145-12-30", count: 1 });
     expect(ctx("2028-01-01")).toEqual({ text: "2028-01-01", count: 0 });
     expect(ctx("2024-12-31")).toEqual({ text: "2024-12-31", count: 0 });
+  });
+
+  test("ISO dates need a valid month/day and no trailing digit (N1)", () => {
+    for (const text of [
+      "INC-2026-01-0042",
+      "2026-13-45",
+      "2026-10-12345",
+      "2026-00-10",
+      "2026-10-00",
+      "2026-10-32",
+    ]) {
+      expect(ctx(text)).toEqual({ text, count: 0 });
+    }
+    expect(ctx("2026-10-12_14-30")).toEqual({ text: "2146-10-12_14-30", count: 1 });
+    expect(ctx("2026-01-31 2027-12-01")).toEqual({ text: "2146-01-31 2147-12-01", count: 2 });
   });
 
   test("English, Portuguese and numeric date forms", () => {
@@ -201,7 +248,7 @@ describe("idempotency", () => {
 
   for (const mode of ["context", "clock"] as const) {
     test(`${mode}: applying twice equals applying once`, () => {
-      for (const years of [YEARS, -120, 3, -3]) {
+      for (const years of [YEARS, -120, 4, -3]) {
         for (const text of corpus) {
           const once = run(mode, text, years);
           const twice = run(mode, once.text, years);
@@ -211,5 +258,69 @@ describe("idempotency", () => {
         }
       }
     });
+
+    test(`${mode}: re-applying after the real year changed (Y then Y+1) changes nothing`, () => {
+      for (const years of [4, YEARS, -3, -120]) {
+        for (const text of corpus) {
+          const once = run(mode, text, years, REAL_YEAR);
+          const next = run(mode, once.text, years, REAL_YEAR + 1);
+          expect(next).toEqual({ text: once.text, count: 0 });
+        }
+      }
+    });
   }
+
+  test("years = 4: a year shifted under 2026 is not a target under 2027 (m1)", () => {
+    expect(ctx("2026-12-30", 4, 2026)).toEqual({ text: "2030-12-30", count: 1 });
+    expect(ctx("2030-12-30", 4, 2027)).toEqual({ text: "2030-12-30", count: 0 });
+    expect(clk("2030-12-30", 4, 2027)).toEqual({ text: "2030-12-30", count: 0 });
+  });
+});
+
+describe("shiftRolloverLines", () => {
+  test("shifts only the rollover line, every other line byte-identical (m3)", () => {
+    expect(
+      shiftRolloverLines(
+        "Instructions updated.\nFreeze 2026-12-20.\nToday's date is now: Tue Oct 13 2026",
+        REAL_YEAR,
+        YEARS,
+      ),
+    ).toEqual({
+      text: "Instructions updated.\nFreeze 2026-12-20.\nToday's date is now: Tue Oct 13 2146",
+      count: 1,
+    });
+  });
+
+  test("keeps CRLF, accepts indentation, curly apostrophe and any case", () => {
+    const input =
+      "Freeze 2026-12-20.\r\n  today\u2019s date is now: 2026-10-13\r\nThe current year is 2026.\r\n";
+    expect(shiftRolloverLines(input, REAL_YEAR, YEARS)).toEqual({
+      text:
+        "Freeze 2026-12-20.\r\n  today\u2019s date is now: 2146-10-13\r\nThe current year is 2026.\r\n",
+      count: 1,
+    });
+  });
+
+  test("leaves non-rollover text (including plain Today's date:) untouched", () => {
+    for (const text of [
+      "Today's date: Mon Oct 12 2026",
+      "Note: Today's date is now: Tue Oct 13 2026",
+      "Release on 2026-10-12.\nThe current year is 2026.",
+      "",
+    ]) {
+      const result = shiftRolloverLines(text, REAL_YEAR, YEARS);
+      expect(result).toEqual({ text, count: 0 });
+      expect(result.text).toBe(text);
+    }
+  });
+
+  test("is idempotent and supports negative offsets", () => {
+    const once = shiftRolloverLines("x\nToday's date is now: Tue Oct 13 2026", REAL_YEAR, -120);
+    expect(once).toEqual({ text: "x\nToday's date is now: Tue Oct 13 1906", count: 1 });
+    expect(shiftRolloverLines(once.text, REAL_YEAR, -120)).toEqual({ text: once.text, count: 0 });
+    expect(shiftRolloverLines(once.text, REAL_YEAR + 1, -120)).toEqual({
+      text: once.text,
+      count: 0,
+    });
+  });
 });

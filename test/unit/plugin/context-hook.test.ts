@@ -109,6 +109,41 @@ describe("createContextHook", () => {
     expect(otherPart).toEqual({ type: "image", url: "file://2026-10-13.png" });
   });
 
+  test("in role system messages only the rollover line changes (m3)", async () => {
+    const host = await setup();
+    const text = "Instructions updated.\nFreeze 2026-12-20.\nToday's date is now: Tue Oct 13 2026";
+    const expected = "Instructions updated.\nFreeze 2026-12-20.\nToday's date is now: Tue Oct 13 2146";
+    const stringMessage: ContextMessage = { role: "system", content: text };
+    const item = { type: "text", text };
+    const plain = { type: "text", text: "Today's date: Mon Oct 12 2026\nThe current year is 2026." };
+    const arrayMessage: ContextMessage = { role: "system", content: [item, plain] };
+    const event = makeEvent({ messages: [stringMessage, arrayMessage] });
+
+    await host.fire.context(event);
+
+    expect(stringMessage.content).toBe(expected);
+    expect(item.text).toBe(expected);
+    expect(plain.text).toBe("Today's date: Mon Oct 12 2026\nThe current year is 2026.");
+    expect(host.logs).toEqual([]);
+  });
+
+  test("applies all-or-nothing: a frozen target rolls back earlier writes and logs (N2)", async () => {
+    const host = await setup();
+    const part: SystemPart = { type: "text", text: "Today's date: Mon Oct 12 2026" };
+    const rollover: ContextMessage = { role: "system", content: "Today's date is now: Tue Oct 13 2026" };
+    const frozen = Object.freeze({ description: "The current year is 2026." });
+    const event = makeEvent({ system: [part], tools: { websearch: frozen }, messages: [rollover] });
+
+    await host.fire.context(event);
+
+    expect(part.text).toBe("Today's date: Mon Oct 12 2026");
+    expect(frozen.description).toBe("The current year is 2026.");
+    expect(rollover.content).toBe("Today's date is now: Tue Oct 13 2026");
+    expect(host.logs).toHaveLength(1);
+    expect(host.logs[0]?.level).toBe("error");
+    expect(host.logs[0]?.message).toMatch(/^\[future-clock\] context hook failed: /);
+  });
+
   test("shifts tool descriptions with a year and leaves the others untouched", async () => {
     const host = await setup();
     const websearch = { description: "Search the web. The current year is 2026.", parameters: {} };

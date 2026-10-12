@@ -1,4 +1,4 @@
-import { shiftYears } from "../core/years";
+import { shiftRolloverLines, shiftYears } from "../core/years";
 import type { ContextEvent, HostPorts } from "./ports";
 
 export interface ContextHookDeps {
@@ -9,11 +9,35 @@ export interface ContextHookDeps {
   log: HostPorts["log"];
 }
 
+/** One computed string replacement: `apply` writes the new value, `undo` restores the old one. */
+interface PendingChange {
+  apply: () => void;
+  undo: () => void;
+}
+
 /**
- * Context hook (S1–S3, D8, D10): shifts date-shaped years in system parts,
- * tool descriptions and role "system" messages (e.g. the day rollover notice).
- * Messages of every other role are never touched. Mutates in place, only where
- * `shiftYears` reports a change; idempotent; never throws.
+ * Applies every change or none: if an assignment throws (a frozen object or a
+ * throwing setter installed by another plugin), the changes already applied are
+ * restored in reverse order and the error is rethrown.
+ */
+function applyAll(changes: readonly PendingChange[]): void {
+  const applied: PendingChange[] = [];
+  try {
+    for (const change of changes) {
+      change.apply();
+      applied.push(change);
+    }
+  } catch (error) {
+    for (const change of applied.reverse()) change.undo();
+    throw error;
+  }
+}
+
+/**
+ * Context hook (S1–S3, D8, D10): shifts date-shaped years in system parts and
+ * tool descriptions, and only the "Today's date is now:" rollover lines of role
+ * "system" messages. Messages of every other role are never touched. Mutates in
+ * place, only where a change is reported; all-or-nothing; idempotent; never throws.
  */
 export function createContextHook(deps: ContextHookDeps): (event: ContextEvent) => void {
   return (event: ContextEvent): void => {
@@ -23,38 +47,78 @@ export function createContextHook(deps: ContextHookDeps): (event: ContextEvent) 
         const result = shiftYears({ text, realYear, years: deps.years, mode: "context" });
         return result.count > 0 ? result.text : undefined;
       };
+      const shiftRollover = (text: string): string | undefined => {
+        const result = shiftRolloverLines(text, realYear, deps.years);
+        return result.count > 0 ? result.text : undefined;
+      };
 
-      // Compute every change first, apply afterwards: a failure mid-way leaves the event as is.
-      const pending: Array<() => void> = [];
+      // Phase 1: compute every new string without touching the event.
+      const pending: PendingChange[] = [];
 
       for (const part of event.system) {
         if (part.type !== "text" || typeof part.text !== "string") continue;
-        const next = shift(part.text);
-        if (next !== undefined) pending.push(() => (part.text = next));
+        const previous = part.text;
+        const next = shift(previous);
+        if (next === undefined) continue;
+        pending.push({
+          apply: () => {
+            part.text = next;
+          },
+          undo: () => {
+            part.text = previous;
+          },
+        });
       }
 
       for (const tool of Object.values(event.tools)) {
         if (typeof tool.description !== "string") continue;
-        const next = shift(tool.description);
-        if (next !== undefined) pending.push(() => (tool.description = next));
+        const previous = tool.description;
+        const next = shift(previous);
+        if (next === undefined) continue;
+        pending.push({
+          apply: () => {
+            tool.description = next;
+          },
+          undo: () => {
+            tool.description = previous;
+          },
+        });
       }
 
       for (const message of event.messages) {
         if (message.role !== "system") continue;
         const content = message.content;
         if (typeof content === "string") {
-          const next = shift(content);
-          if (next !== undefined) pending.push(() => (message.content = next));
+          const next = shiftRollover(content);
+          if (next === undefined) continue;
+          pending.push({
+            apply: () => {
+              message.content = next;
+            },
+            undo: () => {
+              message.content = content;
+            },
+          });
         } else if (Array.isArray(content)) {
           for (const item of content) {
             if (item.type !== "text" || typeof item.text !== "string") continue;
-            const next = shift(item.text);
-            if (next !== undefined) pending.push(() => (item.text = next));
+            const previous = item.text;
+            const next = shiftRollover(previous);
+            if (next === undefined) continue;
+            pending.push({
+              apply: () => {
+                item.text = next;
+              },
+              undo: () => {
+                item.text = previous;
+              },
+            });
           }
         }
       }
 
-      for (const apply of pending) apply();
+      // Phase 2: write them all-or-nothing (rolled back if any assignment throws).
+      applyAll(pending);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       deps.log("error", `[future-clock] context hook failed: ${message}`);
