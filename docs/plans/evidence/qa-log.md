@@ -89,3 +89,25 @@ Veredito: **CHANGES REQUIRED** (0 BLOCKER, 1 MAJOR, 9 MINOR, 9 NIT).
 | n8 | DOCUMENTED | D-QA2-7 |
 
 Checks após as correções: `typecheck` 0 · `test` 286/286 · `e2e` 7/7.
+
+## QA-2 + QA-G — rodada 2 (final) — reviewer heavy
+
+Veredito: **PASS** (0 BLOCKER, 0 MAJOR, 1 MINOR, 6 NIT).
+
+Checks: `typecheck` 0 · `test` 286/286 · `build` 0 · `e2e` run 4 7/7 · experimento 32/32 · cleanup COMPLETE · 37 commits sem trailers de IA.
+
+Todos os itens da rodada 1 foram verificados como FIXED/OK. AG1–AG9: PASS.
+
+Novos achados (todos ACEITO, regra: após 2ª rodada só MAJOR+):
+
+| ID | Severidade | Achado | Status |
+|---|---|---|---|
+| m-new-1 | MINOR | O e2e não verifica `exitCode`/`errors` do run; o E6 não exige que o filho tenha rodado `Get-Date` (o clock check pode passar vazio) nem que a resposta traga 2146; "subagente do router conclui sem erro" não é asserido | ACEITO (regra: após 2ª rodada só MAJOR+) |
+| NIT1 | NIT | `e2e-report.md` rotula a tabela como run 3, mas a linha E6 descreve o E6 do run 4 | ACEITO (regra: após 2ª rodada só MAJOR+) |
+| NIT2 | NIT | `future-report.md` diz "uma sessão cada", o que conflita com P8 (sessão filha); os sessionIDs dos `run.json` são anteriores à união com os nomes dos dumps | ACEITO (regra: após 2ª rodada só MAJOR+) |
+| NIT3 | NIT | Nada prova que o `console.error` do plugin chega ao stderr capturado; warnings não falham o E6 | ACEITO (regra: após 2ª rodada só MAJOR+) |
+| NIT4 | NIT | Drift plano/código não registrado: D11 vs origem da URL no `.l3.json`; o cleanup apaga `iso` (o plano dizia `config/xdg-config`); `ARTIFACT_DIRS` e `routerSentinels` sem uso | ACEITO (regra: após 2ª rodada só MAJOR+) |
+| NIT5 | NIT | `secrets.test.ts` não varre os arquivos da raiz (`package.json`, `tsconfig.json`, `.gitignore`, `bun.lock`) | ACEITO (regra: após 2ª rodada só MAJOR+) |
+| NIT6 | NIT | A seção QA-2 rodada 1 lista só o status; o README diz "bodies OpenAI Chat ficam intocados", o que só vale com mensagem system/tool/developer | ACEITO (regra: após 2ª rodada só MAJOR+) |
+
+Plano concluído; DoD global atendido com os achados acima aceitos.
