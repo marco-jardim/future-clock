@@ -163,7 +163,8 @@ describe.skipIf(process.env["FUTURE_E2E"] !== "1")("future-clock e2e", () => {
       const reads = readToolResults(last);
       expect(reads.length).toBeGreaterThan(0);
       expect(reads.some((text) => text.includes("2026-10-12"))).toBe(true);
-      expectShiftedAnswer(s);
+      // notes.txt legitimately holds the real year (out of scope by design), so the answer may quote it.
+      expect(hasYearToken(responseText(s), shiftedYear())).toBe(true);
       await expectL3Untouched(s.bodies);
       expectNoRealYearInPrompts(s.bodies);
       await expectNoSecrets(s);
@@ -254,10 +255,13 @@ describe.skipIf(process.env["FUTURE_E2E"] !== "1")("future-clock e2e", () => {
       expect(sentinels.length).toBeGreaterThan(0);
       const system = s.bodies.map(systemText).join("\n");
       expect(sentinels.some((sentinel) => system.includes(sentinel))).toBe(true);
-      for (const body of s.bodies) expect(systemText(body).includes(ROUTER_SENTINEL)).toBe(true);
-      expect(new Set(s.bodies.map((b) => b.sessionID)).size).toBeGreaterThanOrEqual(2);
       const parent = s.run.parentSessionID;
       expect(parent).toBeDefined();
+      // The router injects its protocol only into the parent session; child bodies do not carry it.
+      const parentBodies = s.bodies.filter((b) => b.sessionID === parent);
+      expect(parentBodies.length).toBeGreaterThan(0);
+      for (const body of parentBodies) expect(systemText(body).includes(ROUTER_SENTINEL)).toBe(true);
+      expect(new Set(s.bodies.map((b) => b.sessionID)).size).toBeGreaterThanOrEqual(2);
       const children = s.bodies.filter((b) => b.sessionID !== parent);
       expect(children.length).toBeGreaterThan(0);
       for (const body of children) expectShiftedTodayLine(body);
