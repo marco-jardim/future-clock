@@ -11,3 +11,5 @@
 | D-PF7 | Linear não usado (sem `.env` no repo). |
 | D-PF8 | Problema conhecido do probe-runner: EBUSY ao recriar diretórios observados pelo serviço em background; algumas execuções (S-mutate, S-real) rodaram sem `opencode.json` e foram refeitas manualmente (S-mutate2, S-real2). Não corrigido (ferramenta de probe, substituída por `sandbox.ts` na Fase 2). |
 | D-PF9 | Reescrita do rollover: apenas linhas que começam com `Today's date is now:` dentro de mensagens role `system` (hook context) / blocos de texto de mensagem (L3); mensagens de usuário permanecem intocadas. |
+| D-QA1 | `years` mínimo passa a `years >= 4 \|\| years <= -3` (antes `\|years\| >= 3`), para idempotência quando o ano real vira entre eventos (QA-1 m1). |
+| D-QA2 | Fronteira L3 reescreve em mensagens só linhas `Today's date is now:` de user/system; texto de assistant nunca é tocado (QA-1 m2). |
