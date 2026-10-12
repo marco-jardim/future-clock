@@ -6,8 +6,9 @@
  * plugin context. This is the only place in src/ that reads the wall clock.
  */
 
-import { isAbsolute } from "node:path";
-import { Plugin } from "@opencode/plugin";
+import { dirname, posix, resolve, win32 } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { Plugin } from "@opencode/plugin";
 import { createBoundaryHook } from "./boundary-hook";
 import { createContextHook } from "./context-hook";
 import { hostPortsFromContext } from "./host-adapter";
@@ -24,11 +25,60 @@ function describeError(error: unknown): string {
   return String(error);
 }
 
-function resolveDumpDir(env: FutureClockEnv): string | undefined {
+/**
+ * Repository root. This module sits two directories below it both as source
+ * (`src/plugin/index.ts`) and as the bundle (`dist/future-clock/server.js`).
+ */
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+/** `..` plus the Win32 spellings that normalize to it (`...`, `.. `). */
+const PARENT_SEGMENT = /^\.\.[. ]*$/;
+
+type PathApi = typeof win32;
+
+/** Comparable form: separators unified, trailing dots/spaces per segment dropped (Win32 does), lower-cased. */
+function comparable(path: string, api: PathApi): string {
+  return api
+    .resolve(path)
+    .split(/[\\/]+/)
+    .map((segment) => segment.replace(/[. ]+$/, ""))
+    .filter((segment) => segment.length > 0)
+    .join("/")
+    .toLowerCase();
+}
+
+function isInside(child: string, root: string, api: PathApi): boolean {
+  const c = comparable(child, api);
+  const r = comparable(root, api);
+  return c === r || c.startsWith(`${r}/`);
+}
+
+/**
+ * Validates `FUTURE_CLOCK_DUMP_DIR`: absolute, not UNC (`\\x`, `//x`), not
+ * root-relative (`\x`; also `/x` on win32), no `..` segments, and not inside
+ * `protectedRoot` (the repository, compared case-insensitively).
+ * Returns undefined when unset/empty; throws a clear error otherwise.
+ */
+export function resolveDumpDir(
+  env: FutureClockEnv,
+  protectedRoot: string = REPO_ROOT,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
   const raw = env.FUTURE_CLOCK_DUMP_DIR;
   if (raw === undefined || raw.length === 0) return undefined;
-  if (!isAbsolute(raw)) {
-    throw new Error(`future-clock: FUTURE_CLOCK_DUMP_DIR must be an absolute path, got "${raw}"`);
+  const api: PathApi = platform === "win32" ? win32 : posix;
+  const reject = (reason: string): Error =>
+    new Error(`future-clock: FUTURE_CLOCK_DUMP_DIR ${reason}, got "${raw}"`);
+  if (raw.startsWith("\\\\") || raw.startsWith("//")) throw reject("must not be a UNC path");
+  if (raw.startsWith("\\") || (platform === "win32" && raw.startsWith("/"))) {
+    throw reject("must not be root-relative");
+  }
+  if (!api.isAbsolute(raw)) throw reject("must be an absolute path");
+  if (raw.split(/[\\/]+/).some((segment) => PARENT_SEGMENT.test(segment))) {
+    throw reject("must not contain '..' segments");
+  }
+  if (isInside(raw, protectedRoot, api)) {
+    throw reject(`must not be inside the repository (${protectedRoot})`);
   }
   return raw;
 }
@@ -83,10 +133,13 @@ export async function setupWith(
   };
 }
 
-export default Plugin.define({
+/** Plain object typed against the host (D2: type-only import, no runtime dependency on @opencode/plugin). */
+const plugin: Plugin.Plugin = {
   id: "future-clock",
   setup: (ctx) =>
     setupWith(hostPortsFromContext(ctx), ctx.options, {
       FUTURE_CLOCK_DUMP_DIR: process.env.FUTURE_CLOCK_DUMP_DIR,
     }),
-});
+};
+
+export default plugin;
