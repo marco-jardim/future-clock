@@ -29,8 +29,8 @@ describe("parseOptions", () => {
     );
   });
 
-  test("rejects years 2 (|years| < 3) via validateYears", () => {
-    expect(() => parseOptions({ years: 2 }, REAL_YEAR)).toThrow(/\|years\| >= 3/);
+  test("rejects years 2 (-3 < years < 4) via validateYears", () => {
+    expect(() => parseOptions({ years: 2 }, REAL_YEAR)).toThrow(/years >= 4 or years <= -3/);
     expect(() => parseOptions({ years: "120" }, REAL_YEAR)).toThrow(/must be an integer/);
   });
 
