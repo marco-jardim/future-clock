@@ -1,7 +1,9 @@
 // Resumable control-vs-treatment experiment battery (plan §0.7, task 2.3).
 // Each invocation runs at most MAX_RUNS_PER_INVOCATION opencode runs, prints a <= 4 KiB summary
-// and ends with COMPLETE once every (arm, prompt, n) is done. State and runs live in the
-// artifacts directory (outside the repo); the sandbox is recreated before every run.
+// and ends with COMPLETE once every (arm, prompt, n) is done ("COMPLETE (with N failed runs: …)"
+// when some run is not ok); whenever nothing is pending it (re)writes runs\summary.json. State
+// and runs live in the artifacts directory (outside the repo); the sandbox is recreated before
+// every run, and the project is built once per invocation before the first run.
 // Usage: bun scripts/experiment.ts [--reset]   (--reset clears the state, never the runs)
 import { appendFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -17,7 +19,11 @@ export const MODEL = DEFAULT_MODEL;
 export const RUNS_ROOT = artifactPath("runs");
 export const STATE_FILE = artifactPath("state", "experiment.json");
 export const ERROR_LOG = artifactPath("state", "experiment-errors.log");
+export const SUMMARY_FILE = artifactPath("runs", "summary.json");
 export const TOTAL_RUNS = ARMS.length * PROMPTS.length * N;
+
+const REPO_ROOT = join(import.meta.dir, "..");
+const BUILD_OUTPUT_TAIL_CHARS = 800;
 
 /** Top-level sandbox entries created by createSandbox itself (not by the model). */
 const SANDBOX_BASELINE = new Set([".git", "opencode.json", "notes.txt"]);
@@ -52,6 +58,28 @@ interface State {
   done: string[];
 }
 
+/** A recorded run (its run.json) plus the number of dump files found in its dumps dir. */
+export interface RecordedRun {
+  record: RunRecord;
+  dumpCount: number;
+}
+
+/** One entry of runs\summary.json. */
+export interface SummaryEntry {
+  id: string;
+  arm: Arm;
+  promptId: PromptId;
+  n: number;
+  ok: boolean;
+  exitCode: number;
+  durationMs: number;
+  tools: string[];
+  createdFiles: string[];
+  sessionIDs: string[];
+  dumpCount: number;
+  text: string;
+}
+
 /** State key of a run: `${arm}/${promptId}/${n}`. */
 export function runKey(arm: Arm, promptId: PromptId, n: number): string {
   return `${arm}/${promptId}/${n}`;
@@ -74,6 +102,54 @@ export function planRuns(done: readonly string[]): PlannedRun[] {
 /** Artifact directory of a run: runs\<arm>\<promptId>\<n>. */
 export function runDir(run: PlannedRun): string {
   return artifactPath("runs", run.arm, run.promptId, String(run.n));
+}
+
+/** Dumps directory of a run: runs\<arm>\<promptId>\<n>\dumps. */
+export function dumpsDir(run: PlannedRun): string {
+  return artifactPath("runs", run.arm, run.promptId, String(run.n), "dumps");
+}
+
+/**
+ * A run is ok when opencode exited 0, did not time out, reported no errors, and the plugin
+ * behaved as expected for the arm: treatment must produce at least one dump, control (no plugin) none.
+ */
+export function isRunOk(
+  arm: Arm,
+  exitCode: number,
+  errors: readonly string[],
+  timedOut: boolean,
+  dumpCount: number,
+): boolean {
+  if (exitCode !== 0 || timedOut || errors.length > 0) return false;
+  return arm === "treatment" ? dumpCount >= 1 : dumpCount === 0;
+}
+
+/**
+ * Summary entries sorted by id (`arm/promptId/n`). `ok` is re-evaluated with isRunOk against the
+ * current dump count, so records written before the per-arm dump rule are judged the same way.
+ */
+export function buildSummary(runs: readonly RecordedRun[]): SummaryEntry[] {
+  const entries = runs.map(({ record: r, dumpCount }): SummaryEntry => ({
+    id: runKey(r.arm, r.promptId, r.n),
+    arm: r.arm,
+    promptId: r.promptId,
+    n: r.n,
+    ok: isRunOk(r.arm, r.exitCode, r.errors, r.timedOut, dumpCount),
+    exitCode: r.exitCode,
+    durationMs: r.durationMs,
+    tools: r.toolCalls.map((c) => c.tool),
+    createdFiles: [...r.createdFiles],
+    sessionIDs: [...r.sessionIDs],
+    dumpCount,
+    text: r.texts.join("\n"),
+  }));
+  return entries.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/** Final status line: plain COMPLETE, or COMPLETE with the failed run ids (always starts with "COMPLETE"). */
+export function completeLine(summary: readonly SummaryEntry[]): string {
+  const failed = summary.filter((e) => !e.ok).map((e) => e.id);
+  return failed.length === 0 ? "COMPLETE" : `COMPLETE (with ${failed.length} failed runs: ${failed.join(", ")})`;
 }
 
 /** Joins `body` then `footer` lines, dropping body lines (with a marker) so the result fits `limitBytes`. */
@@ -101,6 +177,62 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((x: unknown) => typeof x === "string");
+}
+
+function isArm(v: unknown): v is Arm {
+  return ARMS.some((a) => a === v);
+}
+
+function isPromptId(v: unknown): v is PromptId {
+  return PROMPTS.some((p) => p.id === v);
+}
+
+function isToolCall(v: unknown): v is RunResult["toolCalls"][number] {
+  return (
+    isRecord(v) && typeof v["tool"] === "string" && (v["output"] === undefined || typeof v["output"] === "string")
+  );
+}
+
+/** Validates a parsed run.json against RunRecord; throws naming the first bad field. */
+function parseRunRecord(v: unknown, path: string): RunRecord {
+  const bad = (field: string): Error => new Error(`invalid run record (field "${field}"): ${path}`);
+  if (!isRecord(v)) throw bad("<root>");
+  const { arm, promptId, n, prompt, startedAt, durationMs, exitCode, timedOut, ok } = v;
+  const { texts, toolCalls, errors, sessionIDs, createdFiles, opencodeVersion, model } = v;
+  if (!isArm(arm)) throw bad("arm");
+  if (!isPromptId(promptId)) throw bad("promptId");
+  if (typeof n !== "number") throw bad("n");
+  if (typeof prompt !== "string") throw bad("prompt");
+  if (typeof startedAt !== "string") throw bad("startedAt");
+  if (typeof durationMs !== "number") throw bad("durationMs");
+  if (typeof exitCode !== "number") throw bad("exitCode");
+  if (typeof timedOut !== "boolean") throw bad("timedOut");
+  if (typeof ok !== "boolean") throw bad("ok");
+  if (!isStringArray(texts)) throw bad("texts");
+  if (!Array.isArray(toolCalls) || !toolCalls.every(isToolCall)) throw bad("toolCalls");
+  if (!isStringArray(errors)) throw bad("errors");
+  if (!isStringArray(sessionIDs)) throw bad("sessionIDs");
+  if (!isStringArray(createdFiles)) throw bad("createdFiles");
+  if (typeof opencodeVersion !== "string") throw bad("opencodeVersion");
+  if (typeof model !== "string") throw bad("model");
+  return {
+    arm,
+    promptId,
+    n,
+    prompt,
+    startedAt,
+    durationMs,
+    exitCode,
+    timedOut,
+    ok,
+    texts,
+    toolCalls,
+    errors,
+    sessionIDs,
+    createdFiles,
+    opencodeVersion,
+    model,
+  };
 }
 
 function errorCode(e: unknown): unknown {
@@ -144,6 +276,53 @@ async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
   await rename(tmp, path);
 }
 
+/** Number of dump files in a run's dumps dir (top-level files, as runOpencode lists them); 0 if absent. */
+async function countDumps(dir: string): Promise<number> {
+  const entries = await readdir(dir, { withFileTypes: true }).catch((e: unknown) => {
+    if (errorCode(e) === "ENOENT") return null;
+    throw e;
+  });
+  return entries === null ? 0 : entries.filter((e) => e.isFile()).length;
+}
+
+/** Reads every planned run's run.json (all must exist: called only when nothing is pending). */
+async function loadRecordedRuns(): Promise<RecordedRun[]> {
+  const out: RecordedRun[] = [];
+  for (const run of planRuns([])) {
+    const path = join(runDir(run), "run.json");
+    let raw: string;
+    try {
+      raw = await readFile(path, "utf8");
+    } catch (e) {
+      if (errorCode(e) === "ENOENT") {
+        throw new Error(`state marks ${runKey(run.arm, run.promptId, run.n)} done but ${path} is missing (use --reset to rerun)`);
+      }
+      throw e;
+    }
+    out.push({ record: parseRunRecord(JSON.parse(raw), path), dumpCount: await countDumps(dumpsDir(run)) });
+  }
+  return out;
+}
+
+/** Builds the project (`bun scripts/build.ts` from the repo root) so a stale dist is never tested. */
+async function runBuild(): Promise<void> {
+  const proc = Bun.spawn([process.execPath, "scripts/build.ts"], {
+    cwd: REPO_ROOT,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  if (code !== 0) {
+    const output = `${stdout}${stderr}`.trim().slice(-BUILD_OUTPUT_TAIL_CHARS);
+    throw new Error(`build failed (bun scripts/build.ts exited ${code}); aborting so a stale dist is not tested: ${output}`);
+  }
+}
+
 /** Files under the sandbox not created by createSandbox (relative, "/"-separated, links not followed). */
 async function listCreatedFiles(root: string): Promise<string[]> {
   const out: string[] = [];
@@ -166,16 +345,17 @@ async function resetRunDir(dir: string): Promise<void> {
   await rm(await assertUnder(RUNS_ROOT, dir), { recursive: true, force: true });
 }
 
-async function executeRun(run: PlannedRun): Promise<RunRecord> {
+async function executeRun(run: PlannedRun): Promise<RecordedRun> {
   const prompt = promptText(run.promptId);
   const dir = runDir(run);
   await resetRunDir(dir);
   const cwd = await createSandbox({ arm: run.arm, model: MODEL });
-  const dumpDir = artifactPath("runs", run.arm, run.promptId, String(run.n), "dumps");
+  const dumpDir = dumpsDir(run);
   const startedAt = new Date();
   const result = await runOpencode({ cwd, prompt, isolated: true, dumpDir, model: MODEL, timeoutMs: RUN_TIMEOUT_MS });
   const durationMs = Date.now() - startedAt.getTime();
   const createdFiles = await listCreatedFiles(cwd);
+  const dumpCount = await countDumps(dumpDir);
   const record: RunRecord = {
     arm: run.arm,
     promptId: run.promptId,
@@ -185,7 +365,7 @@ async function executeRun(run: PlannedRun): Promise<RunRecord> {
     durationMs,
     exitCode: result.exitCode,
     timedOut: result.timedOut,
-    ok: result.exitCode === 0 && !result.timedOut && result.errors.length === 0,
+    ok: isRunOk(run.arm, result.exitCode, result.errors, result.timedOut, dumpCount),
     texts: result.texts,
     toolCalls: result.toolCalls,
     errors: result.errors,
@@ -195,13 +375,14 @@ async function executeRun(run: PlannedRun): Promise<RunRecord> {
     model: MODEL,
   };
   await writeJsonAtomic(join(dir, "run.json"), record);
-  return record;
+  return { record, dumpCount };
 }
 
-function recordLine(key: string, r: RunRecord): string {
+function recordLine(key: string, { record: r, dumpCount }: RecordedRun): string {
   const head =
     `${key} ${r.ok ? "ok" : "FAIL"} exit=${r.exitCode}${r.timedOut ? " timeout" : ""} ` +
-    `${Math.round(r.durationMs / 1000)}s tools=${r.toolCalls.length} errors=${r.errors.length} files=${r.createdFiles.length}`;
+    `${Math.round(r.durationMs / 1000)}s tools=${r.toolCalls.length} errors=${r.errors.length} ` +
+    `files=${r.createdFiles.length} dumps=${dumpCount}`;
   const firstError = r.errors[0];
   return firstError === undefined ? head : `${head} | ${oneLine(firstError, 160)}`;
 }
@@ -220,14 +401,16 @@ async function main(argv: readonly string[]): Promise<void> {
   }
   const state = await loadState();
   const batch = planRuns(state.done).slice(0, MAX_RUNS_PER_INVOCATION);
+  // Build once per invocation, before any run, so the treatment arm never tests a stale dist.
+  if (batch.length > 0) await runBuild();
   const body: string[] = [];
   for (const run of batch) {
     const key = runKey(run.arm, run.promptId, run.n);
     try {
-      const record = await executeRun(run);
+      const recorded = await executeRun(run);
       state.done.push(key);
       await writeJsonAtomic(STATE_FILE, state);
-      body.push(recordLine(key, record));
+      body.push(recordLine(key, recorded));
     } catch (e) {
       await logException(key, e);
       body.push(`${key} EXCEPTION (not marked done, retried next time): ${oneLine(describe(e), 200)}`);
@@ -235,7 +418,11 @@ async function main(argv: readonly string[]): Promise<void> {
   }
   const remaining = planRuns(state.done).length;
   const footer = [`progress ${TOTAL_RUNS - remaining}/${TOTAL_RUNS} (runs: ${RUNS_ROOT})`];
-  if (remaining === 0) footer.push("COMPLETE");
+  if (remaining === 0) {
+    const summary = buildSummary(await loadRecordedRuns());
+    await writeJsonAtomic(SUMMARY_FILE, summary);
+    footer.push(`summary: ${SUMMARY_FILE}`, completeLine(summary));
+  }
   console.log(clipSummary(body, footer, SUMMARY_LIMIT_BYTES));
 }
 
