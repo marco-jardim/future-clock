@@ -23,9 +23,11 @@ Run 3 (`bun run test:e2e`): **7 pass, 0 fail — COMPLETE**.
 | E3 | Descrição do websearch | "The current year is 2146" |
 | E4 | Subagente | 4 dumps de 2 sessões (pai + subagente); no subagente, system com 2146 e Get-Date "segunda-feira, 12 de outubro de 2146 19:47:08" |
 | E5 | Controle (sem plugin, sem dumps) | Resposta com o ano real 2026; sem 2146 |
-| E6 | Config global real (opencode-anthropic-fix, opencode-model-router, opencode-telegram-plugin carregados) | Body contém o AGENTS.md global (Sisyphus) e o protocolo do model-router, e ainda assim "Today's date: Mon Oct 12 2146" e "current year is 2146"; nenhum erro `[future-clock]` |
+| E6 | Config global real, prompt forçando subagente + shell | Sentinela do router ("Role Delegation Protocol") presente no body da sessão-pai; ≥2 sessões; bodies filhos deslocados (2146); nenhum ano real em forma de data em system/descrições; nenhum "[future-clock] … failed" no stderr; log de carga dos plugins capturado (`--print-logs`) |
 
-Verificações transversais E7/E8, aplicadas em cada teste: nenhum ano real em forma de data em system/descrições; nenhum segredo nos dumps.
+Run 4 (após as correções do QA-2): **7/7 pass**. A primeira tentativa falhou em 2 asserts rígidos demais (E2: a resposta citava legitimamente o 2026 de `notes.txt`; E6: sentinela do router esperado também nas sessões-filhas), corrigidos no commit "test(e2e): asserções E2/E6 alinhadas ao comportamento real".
+
+Verificações transversais E7/E8 (nenhum ano real em forma de data em system/descrições; nenhum segredo nos dumps) aplicam-se a E0, E1, E2, E4 e E6 — não a E3 (reusa bodies de E1) nem a E5 (sem dumps). E1, E2 e E4 asseguram também `.l3.json` com `changed===0` (os hooks fizeram o trabalho antes da fronteira).
 
 ## Histórico
 

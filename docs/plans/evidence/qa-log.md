@@ -66,3 +66,26 @@ Status dos achados da rodada 1: todos FIXED, exceto:
 | N-F11 | NIT | `resolveDumpDir` sem realpath | ACEITO |
 
 Nota: o caminho do anthropic-fix só foi simulado; reexecutar o e2e real na Fase 2.
+
+## QA-2 + QA-G — rodada 1 — reviewer heavy
+
+Veredito: **CHANGES REQUIRED** (0 BLOCKER, 1 MAJOR, 9 MINOR, 9 NIT).
+
+| ID | Status | Nota |
+|---|---|---|
+| M1 | FIXED | E6 reescrito |
+| m1 | FIXED | Config isolada sempre `{}`, sentinelas em AGENTS/.claude do home, E0 sem router e sem agentes de role. O orquestrador varreu os 80 dumps isolados: 0 ocorrências de Sisyphus / Role Delegation Protocol / linhas do AGENTS global → isolamento mantido |
+| m2 | FIXED | Oráculo `.l3` `changed===0`, checagem das respostas |
+| m3, m4 | FIXED | Relatório |
+| m5 | DOCUMENTED | D-QA2-4 + log em arquivo |
+| m6 | FIXED | sessionIDs filhos extraídos dos nomes dos dumps |
+| m7 | FIXED | Forma do wire estrita + README |
+| m8 | FIXED | decisions D-QA2-* |
+| m9 | FIXED | `secrets.test.ts`, fixtures montadas em runtime |
+| n1, n2, n4, n7, n9 | FIXED | |
+| n3 | ACCEPTED | Data em `notes.txt` é fixa por desenho para esta data de execução |
+| n5 | ACCEPTED | Usuário nos caminhos é o layout desta máquina; README avisa |
+| n6 | FIXED | |
+| n8 | DOCUMENTED | D-QA2-7 |
+
+Checks após as correções: `typecheck` 0 · `test` 286/286 · `e2e` 7/7.

@@ -13,3 +13,10 @@
 | D-PF9 | Reescrita do rollover: apenas linhas que começam com `Today's date is now:` dentro de mensagens role `system` (hook context) / blocos de texto de mensagem (L3); mensagens de usuário permanecem intocadas. |
 | D-QA1 | `years` mínimo passa a `years >= 4 \|\| years <= -3` (antes `\|years\| >= 3`), para idempotência quando o ano real vira entre eventos (QA-1 m1). |
 | D-QA2 | Fronteira L3 reescreve em mensagens só linhas `Today's date is now:` de user/system; texto de assistant nunca é tocado (QA-1 m2). |
+| D-QA2-1 | `cleanup` apaga alvos além do plano: também `D:\future-probe` e `probe\dist` (scratch do pre-flight). `runs` e `dumps` são preservados. |
+| D-QA2-2 | E5 assere sobre o texto da resposta (o controle não tem plugin, logo não há dumps). |
+| D-QA2-3 | E6 assere o sentinela do router ("Role Delegation Protocol") só nos bodies de sessões-pai (o router injeta apenas no orquestrador); sessões-filhas são verificadas como deslocadas. Identidade do texto do router contra um baseline sem plugin NÃO é testada ponta a ponta: coberta pelo teste unitário `coexistence.test.ts`. |
+| D-QA2-4 | `run-e2e` é execução única (não retomável); saída vai para arquivo de log, com resumo de ≤4 KiB no stdout. |
+| D-QA2-5 | `runEnv` remove do pai `INIT_CWD`/`PWD`/`OLDPWD`/`npm_*`/`NODE`/`NODE_ENV`/`OPENCODE*` para o opencode subir no sandbox. |
+| D-QA2-6 | Varredura D13 (segredos) implementada para dumps (e2e) e para arquivos versionados (`test/unit/secrets.test.ts`), excluindo `docs/plans/*.md`. |
+| D-QA2-7 | Gate de custo §7.1 (≤50 sessões) excedido: ~3 execuções e2e × 7 + reexecuções + 32 runs do experimento (+ filhos de subagente) ≈ 70 sessões em `opencode-go/claude-haiku-5-5` (modelo de baixo custo). Aceito. |

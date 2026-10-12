@@ -43,7 +43,7 @@ Em `opencode.json`:
 | S3 | `The current year is YYYY` nas descrições de tools (ex.: `websearch`) | hook `context` |
 | S4 | Saída de comandos que leem o relógio no tool `shell` (`Get-Date`, `date`, `[DateTime]::Now`, `Date.now()`, `datetime.now()` …) | hook `execute.after` |
 
-Além dos hooks, há uma **passada final** no hook `http.request`: o body já serializado é reescrito aplicando as mesmas regras a system, descrições, linha de virada e tool results de `shell` classificados. Mensagens do usuário e texto do assistente nunca são alteradas.
+Além dos hooks, há uma **passada final** no hook `http.request`: o body já serializado é reescrito aplicando as mesmas regras a system, descrições, linha de virada e tool results de `shell` classificados. Em mensagens do usuário só são deslocadas as linhas que começam com `Today's date is now:`; o texto do assistente nunca é alterado.
 
 Nos modos `context` (system, descrições) o ano só é trocado em padrões com forma de data (linha `Today's date`, `current year is`, ISO `YYYY-MM-DD`, `Mon Oct 12 YYYY`, `October 12, YYYY`, `12 de outubro de YYYY`, `dd/mm/YYYY`). No modo `clock` (saída do `shell` classificada) qualquer token de ano delimitado por não-dígitos é trocado, e o prefixo de sequências compactas `yyyyMMdd…`.
 
@@ -51,7 +51,7 @@ Nos modos `context` (system, descrições) o ano só é trocado em padrões com 
 
 - O opencode carrega os plugins da config global primeiro, depois a do projeto, depois pela posição no array `plugins`. Os hooks rodam na ordem de registro. Não há opção de prioridade.
 - Use o `future-clock` na config do projeto, por último no array.
-- A passada final em `http.request` reescreve o body que realmente vai ao provider. Ela detecta o formato pelo body (JSON com `messages` + `system`), não pela URL, e preserva URL, método, headers e `signal`. Assim, o que outros plugins injetarem antes (texto, datas, URL de bridge) é corrigido no ano e o resto do texto deles fica idêntico.
+- A passada final em `http.request` reescreve o body que realmente vai ao provider. Ela detecta o formato pelo body, não pela URL: JSON com array `messages`, nenhuma mensagem com role `system`/`tool`/`developer` e `system` ausente, string ou array (bodies OpenAI Chat ficam intocados, com aviso). Preserva URL, método, headers e `signal`. Assim, o que outros plugins injetarem antes (texto, datas, URL de bridge) é corrigido no ano e o resto do texto deles fica idêntico.
 - Testado com formas de `opencode-model-router` (hooks `context`/`execute.*`, sem `http.request`) e `opencode-anthropic-fix` (troca a URL por uma bridge local e usa body em streaming).
 - **Não suportado:** plugin que mute o body **depois** do `future-clock`.
 - Hooks nunca derrubam a sessão: erros são logados (`[future-clock] …`) e o evento segue intacto.
@@ -65,7 +65,7 @@ $env:FUTURE_CLOCK_DUMP_DIR = "C:\Users\<voce>\Temp\future-dumps"
 ```
 
 - O caminho deve ser **absoluto**, fora do repositório, sem UNC, sem caminho relativo à raiz e sem `..`. Caso contrário o plugin falha no `setup` com mensagem explícita.
-- Grava **somente bodies** (`<sessionID>-<kind>-<seq>.json`, mais um `.l3.json` lateral com o número de correções). Não grava headers nem URL.
+- Grava **somente bodies** (`<sessionID>-<kind>-<seq>.json`, mais um `.l3.json` lateral com o número de correções e a **origem** da URL da requisição: esquema + host, sem path nem query). Não grava headers.
 - **Atenção:** o body contém o seu prompt e a conversa completos (system, mensagens, resultados de tools, conteúdo de arquivos lidos). Trate os arquivos como sensíveis, não os versione nem os compartilhe, e apague-os depois do uso.
 
 ## Scripts
@@ -75,9 +75,9 @@ $env:FUTURE_CLOCK_DUMP_DIR = "C:\Users\<voce>\Temp\future-dumps"
 | `bun run check` | typecheck + testes unitários + build |
 | `bun run build` | gera `dist\future-clock` |
 | `bun run sandbox` / `sandbox:control` | recria o sandbox com / sem o plugin |
-| `bun run test:e2e` | suíte ponta a ponta (retomável; imprime `COMPLETE` ao final) |
-| `bun run experiment` | bateria controle × tratamento (retomável; imprime `COMPLETE` ao final) |
-| `bun run cleanup` | apaga o sandbox e as configs isoladas |
+| `bun run test:e2e` | suíte ponta a ponta, execução única (não retomável); log completo em `%TEMP%\Claude\future-artifacts\state\e2e-*.log` |
+| `bun run experiment` | compila primeiro; bateria controle × tratamento retomável; grava `runs\summary.json` ao final |
+| `bun run cleanup` | apaga `D:\future-sandbox`, `D:\future-probe`, a config isolada e `probe\dist`; preserva `runs` e `dumps` |
 
 ### Sandbox e isolamento
 
@@ -85,6 +85,8 @@ $env:FUTURE_CLOCK_DUMP_DIR = "C:\Users\<voce>\Temp\future-dumps"
 - O isolamento é `XDG_CONFIG_HOME` apontando para uma config vazia, mais `opencode run --standalone`. `OPENCODE_CONFIG_DIR` não substitui a config global.
 - Modelo padrão: `opencode-go/claude-haiku-5-5`.
 - `e2e` e `experiment` chamam o opencode real e criam sessões no diretório de dados dele (não isolado).
+- **E6 usa a config global real:** carrega os plugins globais e seus dumps contêm o seu `AGENTS.md` global. Trate esses dumps como sensíveis.
+- Os caminhos sob `%TEMP%\Claude` são o layout desta máquina (constantes em `artifacts.ts`); ajuste-os em outras máquinas.
 - `bun run cleanup` **preserva** `runs` e `dumps`, que são a evidência do relatório. Para apagá-los manualmente: `%TEMP%\Claude\future-artifacts\runs` e `%TEMP%\Claude\future-artifacts\dumps`. Os dumps têm o mesmo caráter sensível descrito acima.
 
 ## Limitações
@@ -95,7 +97,7 @@ $env:FUTURE_CLOCK_DUMP_DIR = "C:\Users\<voce>\Temp\future-dumps"
 - Leituras indiretas do relógio (script em arquivo) não são detectadas. Saídas de outros tools que não `shell` não passam pelo classificador.
 - **Formatos não cobertos:** `Oct 2026`, `12-Oct-2026`, `2026/10/12`, `Current year: 2026`, `yy`, `yyyyMM`. No modo `clock`, `HHmm` entre 20:25 e 20:27 pode ser deslocado em `yyyyMMdd-HHmm`.
 - **Lacunas do classificador de comandos:** `/usr/bin/date`, `TZ=UTC date`, crases (backticks), `$d = date`, `$(` dentro de aspas duplas e `'` desbalanceado em comentários `#` podem gerar falso negativo ou positivo.
-- Na fronteira só o formato **Anthropic Messages** é tratado. Para outros providers vale apenas o que os hooks (`context`, `execute.after`) cobrem; body desconhecido segue intacto, com aviso.
+- Na fronteira só o formato **Anthropic Messages** é tratado. Para outros providers (inclusive OpenAI Chat) vale apenas o que os hooks (`context`, `execute.after`) cobrem; body desconhecido segue intacto, com aviso.
 - Plugins que só leem eventos podem ver o ano real.
 
 ## Relatório do experimento
