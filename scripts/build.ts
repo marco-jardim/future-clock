@@ -3,7 +3,7 @@
  *   dist/future-clock/server.js     bundle of src/plugin/index.ts (target bun)
  *   dist/future-clock/package.json  minimal manifest pointing at server.js
  * Host packages (@opencode/plugin, effect) stay external; the build fails if
- * a copy of @opencode code ended up embedded in the bundle.
+ * a copy of @opencode or effect code ended up embedded in the bundle.
  */
 
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -14,7 +14,12 @@ const ENTRY = join(ROOT, "src", "plugin", "index.ts");
 const OUT_DIR = join(ROOT, "dist", "future-clock");
 const BUNDLE = join(OUT_DIR, "server.js");
 const MANIFEST = join(OUT_DIR, "package.json");
-const EMBEDDED_HOST_MARKERS: readonly string[] = ["node_modules/@opencode", "node_modules\\@opencode"];
+const EMBEDDED_HOST_MARKERS: readonly string[] = [
+  "node_modules/@opencode",
+  "node_modules\\@opencode",
+  "node_modules/effect",
+  "node_modules\\effect",
+];
 
 const manifest = {
   name: "future-clock",
@@ -66,7 +71,7 @@ async function main(): Promise<void> {
   const code = await bundleFile.text();
   for (const marker of EMBEDDED_HOST_MARKERS) {
     if (code.includes(marker)) {
-      fail(`bundle embeds host code (found "${marker}"); @opencode packages must stay external`);
+      fail(`bundle embeds host code (found "${marker}"); @opencode packages and effect must stay external`);
     }
   }
 

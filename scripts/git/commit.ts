@@ -10,7 +10,25 @@ const QUEUE_DIR = join(REPO_ROOT, ".tmp", "commits");
 const MESSAGE_FILE = join(REPO_ROOT, ".tmp", "commit-message.txt");
 
 const HEADER_RE = /^(feat|fix|test|docs|chore|refactor|perf|build|ci)(\([^()\s]+\))?!?: \S.*$/;
-const FORBIDDEN: readonly RegExp[] = [/co-authored-by/i, /generated with/i];
+const FORBIDDEN: readonly RegExp[] = [
+  /co-?\s?authored[- ]?by/i,
+  /generated (with|by|using)/i,
+  /noreply@anthropic\.com/i,
+  /\bclaude\b.*<[^>]*@anthropic\.com>/i,
+];
+
+/**
+ * Canonical form used by the forbidden-text checks, so look-alikes cannot bypass them:
+ * NFKC, format chars (zero-width etc.) removed, every dash mapped to "-", any whitespace run
+ * (NBSP and newlines included) collapsed to a single space.
+ */
+export function normalizeForCheck(msg: string): string {
+  return msg
+    .normalize("NFKC")
+    .replace(/\p{Cf}/gu, "")
+    .replace(/\p{Pd}/gu, "-")
+    .replace(/\s+/gu, " ");
+}
 
 /** Returns an error description, or null when the message is acceptable. */
 export function validateMessage(msg: string): string | null {
@@ -19,15 +37,21 @@ export function validateMessage(msg: string): string | null {
   if (!HEADER_RE.test(header)) {
     return `header does not match "type(scope)?: subject" with type in feat|fix|test|docs|chore|refactor|perf|build|ci: "${header}"`;
   }
+  const canonical = normalizeForCheck(msg);
   for (const re of FORBIDDEN) {
-    if (re.test(msg)) return `message contains forbidden text (${re.source})`;
+    if (re.test(canonical)) return `message contains forbidden text (${re.source})`;
   }
   return null;
 }
 
-/** Arguments for `git add`, restricted to the listed paths. */
+/** Arguments for `git add`, restricted to the listed paths taken literally (no pathspec magic). */
 export function buildAddArgs(paths: readonly string[]): string[] {
-  return ["add", "--", ...paths];
+  return ["--literal-pathspecs", "add", "--", ...paths];
+}
+
+/** Arguments for `git commit` that record only the listed paths, whatever else is staged. */
+export function buildCommitArgs(msgFile: string, paths: readonly string[]): string[] {
+  return ["--literal-pathspecs", "commit", "-F", msgFile, "--only", "--", ...paths];
 }
 
 function parseItem(raw: unknown): QueueItem | string {
@@ -54,29 +78,48 @@ async function git(args: string[]): Promise<{ code: number; output: string }> {
   return { code, output: (out + err).trim() };
 }
 
-async function processFile(file: string): Promise<string | null> {
+type Outcome = { ok: true } | { ok: false; error: string; committed: boolean };
+
+function fail(error: string, committed = false): Outcome {
+  return { ok: false, error, committed };
+}
+
+/** Re-reads the message actually recorded in HEAD (hooks may have altered it) and validates it. */
+async function verifyRecordedMessage(): Promise<string | null> {
+  const log = await git(["log", "-1", "--format=%B"]);
+  if (log.code !== 0) return `could not read HEAD message (exit ${log.code}): ${log.output}`;
+  const invalid = validateMessage(log.output);
+  if (invalid === null) return null;
+  const head = await git(["rev-parse", "--short", "HEAD"]);
+  return `recorded message of HEAD ${head.code === 0 ? head.output : "?"} is invalid: ${invalid}`;
+}
+
+async function processFile(file: string): Promise<Outcome> {
   let raw: unknown;
   try {
     raw = JSON.parse(await Bun.file(join(QUEUE_DIR, file)).text());
   } catch (e) {
-    return `invalid JSON: ${e instanceof Error ? e.message : String(e)}`;
+    return fail(`invalid JSON: ${e instanceof Error ? e.message : String(e)}`);
   }
   const item = parseItem(raw);
-  if (typeof item === "string") return item;
+  if (typeof item === "string") return fail(item);
   const invalid = validateMessage(item.message);
-  if (invalid !== null) return invalid;
+  if (invalid !== null) return fail(invalid);
 
   const added = await git(buildAddArgs(item.paths));
-  if (added.code !== 0) return `git add failed (exit ${added.code}): ${added.output}`;
+  if (added.code !== 0) return fail(`git add failed (exit ${added.code}): ${added.output}`);
 
   await mkdir(join(REPO_ROOT, ".tmp"), { recursive: true });
   await writeFile(MESSAGE_FILE, item.message.endsWith("\n") ? item.message : `${item.message}\n`, "utf8");
-  const committed = await git(["commit", "-F", MESSAGE_FILE]);
+  const committed = await git(buildCommitArgs(MESSAGE_FILE, item.paths));
   await rm(MESSAGE_FILE, { force: true });
-  if (committed.code !== 0) return `git commit failed (exit ${committed.code}): ${committed.output}`;
+  if (committed.code !== 0) return fail(`git commit failed (exit ${committed.code}): ${committed.output}`);
 
+  // The commit exists from here on: drop the queue item so a rerun cannot duplicate it.
   await rm(join(QUEUE_DIR, file));
-  return null;
+  const recorded = await verifyRecordedMessage();
+  if (recorded !== null) return fail(recorded, true);
+  return { ok: true };
 }
 
 async function main(): Promise<number> {
@@ -92,10 +135,19 @@ async function main(): Promise<number> {
   }
   let done = 0;
   for (const file of files) {
-    const error = await processFile(file);
-    if (error !== null) {
-      console.error(`[commit] FAILED on ${file}: ${error}`);
-      console.error(`[commit] ${done} committed, queue stopped (file kept)`);
+    const outcome = await processFile(file);
+    if (!outcome.ok) {
+      if (outcome.committed) {
+        console.error("[commit] ################################################################");
+        console.error(`[commit] !!! POST-COMMIT CHECK FAILED on ${file}: ${outcome.error}`);
+        console.error("[commit] !!! The commit WAS created (history not rewritten). Fix it manually");
+        console.error("[commit] !!! (e.g. git commit --amend) and check git hooks/config for injected text.");
+        console.error("[commit] ################################################################");
+        console.error(`[commit] ${done + 1} committed, queue stopped (file removed)`);
+      } else {
+        console.error(`[commit] FAILED on ${file}: ${outcome.error}`);
+        console.error(`[commit] ${done} committed, queue stopped (file kept)`);
+      }
       return 1;
     }
     done += 1;

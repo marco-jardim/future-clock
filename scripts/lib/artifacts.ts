@@ -76,12 +76,20 @@ function isInside(root: string, target: string): boolean {
   return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 
-/** Throws unless `target` is an absolute, `..`-free, non-UNC path whose real location is inside `root`. */
+/**
+ * True for a segment made only of dots and spaces (with at least one dot): "..", ".. ", "...", ". .".
+ * Windows drops trailing dots/spaces from names, so any of these may act as "." or "..".
+ */
+function isDotSegment(segment: string): boolean {
+  return segment.includes(".") && /^[. ]+$/.test(segment);
+}
+
+/** Throws unless `target` is an absolute, dot-segment-free, non-UNC path whose real location is inside `root`. */
 export async function assertUnder(root: string, target: string): Promise<string> {
   if (/^[\\/]{2}/.test(target)) throw new Error(`UNC/device path not allowed: ${target}`);
   const absolute = process.platform === "win32" ? /^[A-Za-z]:[\\/]/.test(target) : isAbsolute(target);
   if (!absolute) throw new Error(`path must be absolute: ${target}`);
-  if (target.split(/[\\/]/).includes("..")) throw new Error(`".." segment not allowed: ${target}`);
+  if (target.split(/[\\/]/).some(isDotSegment)) throw new Error(`".." or dot-only segment not allowed: ${target}`);
 
   const normalized = resolve(target);
   const [realRoot, realTarget] = await Promise.all([resolveReal(resolve(root)), resolveReal(normalized)]);
