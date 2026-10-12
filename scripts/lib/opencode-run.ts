@@ -161,7 +161,7 @@ export async function runOpencode(o: RunOptions): Promise<RunResult> {
   const argv = buildArgv(o.model ?? DEFAULT_MODEL, o.prompt, opencode);
   const proc = Bun.spawn(argv, {
     cwd: o.cwd,
-    env: runEnv({ isolated: o.isolated, dumpDir: o.dumpDir }),
+    env: runEnv({ isolated: o.isolated, dumpDir: o.dumpDir, cwd: o.cwd }),
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
