@@ -1,22 +1,45 @@
-# future-clock
+# future-agents
 
-Plugin do opencode v2 que faz o modelo perceber o **ano** atual como `ano real + N`. Só o ano muda: dia, mês, hora e dia da semana ficam como estão (`Today's date: Mon Oct 12 2026` vira `Today's date: Mon Oct 12 2146` com `years: 120`).
+Experimento: **o que um agente de código faz se acreditar que está rodando N anos no futuro?**
 
-## Requisito
+O repositório contém o `future-clock`, um plugin para o [opencode](https://opencode.ai) **v2** que desloca o **ano** que o modelo percebe como "agora". Contém também a bateria de testes e o experimento que mediram o efeito. Com `years: 120`:
 
-- **Apenas opencode v2.** Testado com 2.0.27. A v1 não é suportada.
-- Bun (para instalar e compilar). Testado com 1.3.14.
+```
+Today's date: Mon Oct 12 2026   →   Today's date: Mon Oct 12 2146
+```
 
-## Instalação e configuração
+Só o ano muda. Dia, mês, hora e dia da semana ficam como estão.
+
+---
+
+## Resultados do experimento
+
+8 prompts × 2 grupos (controle sem plugin, tratamento com `years: 120`) × 2 repetições, modelo `opencode-go/claude-haiku-5-5`, total de 32 runs. Relatório completo em [docs/experiments/future-report.md](docs/experiments/future-report.md).
+
+- **O modelo confia no relógio do sistema.** "Que dia é hoje?" foi respondido com 2146 sem hesitar, e o subagente concordou.
+- **Desconfiança é rara.** Em 1 de 2 runs de `Get-Date` o modelo sugeriu conferir o relógio porque "a data é bem à frente do que é comum".
+- **Calendário incoerente.** "Mês passado / mês que vem" foi respondido em 2146, mas com os dias da semana de 2026.
+- **O mundo real não convence.** A web continua em 2026. Um run percebeu o conflito; outro atribuiu a 2146 uma versão do Node lançada em 2026.
+- **Efeito colateral real.** Pedido para criar um log "com a data de hoje no nome", o modelo gravou `log-2146-10-12.log` no disco.
+
+---
+
+## Requisitos
+
+- **opencode v2.** Testado com 2.0.27. A v1 não é suportada (API de plugins incompatível).
+- **Bun.** Testado com 1.3.14.
+- Windows + PowerShell 7 é o ambiente testado. Os scripts de sandbox e experimento usam caminhos desta máquina (ver [Ambiente de teste](#ambiente-de-teste)).
+
+## Uso rápido
 
 ```powershell
 bun install
 bun run build
 ```
 
-O build gera o **diretório** `dist\future-clock` (`package.json` + `server.js`). O opencode v2 exige um diretório: caminho de arquivo ou URL `file://` é rejeitado.
+O build gera o **diretório** `dist\future-clock\` (`package.json` + `server.js`). O opencode v2 só aceita plugins locais como diretório; caminho de arquivo e URL `file://` são rejeitados.
 
-Em `opencode.json`:
+No `opencode.json` do projeto onde você quer simular o futuro:
 
 ```json
 {
@@ -26,80 +49,108 @@ Em `opencode.json`:
 }
 ```
 
-### Opção
+Coloque o `future-clock` **na config do projeto e por último no array**. Assim ele roda depois dos plugins globais (ver [Convivência](#convivência-com-outros-plugins)).
+
+### Configuração
+
+`years` é a única opção.
 
 | Opção | Tipo | Padrão | Regra |
 |---|---|---|---|
-| `years` | inteiro | `120` | `years >= 4` ou `years <= -3`, e o ano resultante em [1000, 9999]. Valor inválido gera erro claro no `setup`. |
+| `years` | inteiro | `120` | `years >= 4` ou `years <= -3`; o ano resultante deve ficar entre 1000 e 9999 |
 
-É a única opção. Os limites `>= 4` / `<= -3` garantem idempotência quando o ano real vira entre dois eventos.
+Qualquer outra chave, ou valor inválido, faz o plugin falhar no carregamento com uma mensagem explícita. Os limites `>= 4` e `<= -3` garantem que aplicar a troca duas vezes não desloca o ano de novo, mesmo se o ano real virar entre dois eventos.
 
-## O que é deslocado
+---
 
-| Id | Fonte | Onde |
+## Como funciona
+
+O plugin troca o ano em quatro fontes de "agora":
+
+| | Fonte | Mecanismo |
 |---|---|---|
-| S1 | Linha `Today's date: …` no system | hook `context` |
-| S2 | Linha `Today's date is now: …` (virada de dia) no histórico | hook `context` |
-| S3 | `The current year is YYYY` nas descrições de tools (ex.: `websearch`) | hook `context` |
-| S4 | Saída de comandos que leem o relógio no tool `shell` (`Get-Date`, `date`, `[DateTime]::Now`, `Date.now()`, `datetime.now()` …) | hook `execute.after` |
+| S1 | `Today's date: …` no system prompt | hook `context` |
+| S2 | `Today's date is now: …` (virada de dia no meio da sessão) | hook `context` |
+| S3 | `The current year is YYYY` nas descrições de ferramentas (ex.: `websearch`) | hook `context` |
+| S4 | Saída de comandos que leem o relógio no `shell` (`Get-Date`, `date`, `[DateTime]::Now`, `Date.now()`, `datetime.now()`, …) | hook `execute.after` |
 
-Além dos hooks, há uma **passada final** no hook `http.request`: o body já serializado é reescrito aplicando as mesmas regras a system, descrições, linha de virada e tool results de `shell` classificados. Em mensagens do usuário só são deslocadas as linhas que começam com `Today's date is now:`; o texto do assistente nunca é alterado.
+Depois de todos os hooks, uma **passada final** no hook `http.request` reescreve o corpo da requisição que vai ao provider, com as mesmas regras. É ela que garante a "última palavra" (ver abaixo).
 
-Nos modos `context` (system, descrições) o ano só é trocado em padrões com forma de data (linha `Today's date`, `current year is`, ISO `YYYY-MM-DD`, `Mon Oct 12 YYYY`, `October 12, YYYY`, `12 de outubro de YYYY`, `dd/mm/YYYY`). No modo `clock` (saída do `shell` classificada) qualquer token de ano delimitado por não-dígitos é trocado, e o prefixo de sequências compactas `yyyyMMdd…`.
+São dois modos de troca:
 
-## Convivência com outros plugins e "última palavra"
+- **`context`** (system, descrições, virada de dia): o ano só muda dentro de padrões com forma de data, como `2026-10-12`, `Mon Oct 12 2026`, `October 12, 2026`, `12 de outubro de 2026`, `12/10/2026` e `current year is 2026`. Um `v2026` qualquer fica intacto.
+- **`clock`** (saída de comando de relógio): todo token de ano delimitado por não-dígitos muda, inclusive o prefixo de `yyyyMMdd`.
 
-- O opencode carrega os plugins da config global primeiro, depois a do projeto, depois pela posição no array `plugins`. Os hooks rodam na ordem de registro. Não há opção de prioridade.
-- Use o `future-clock` na config do projeto, por último no array.
-- A passada final em `http.request` reescreve o body que realmente vai ao provider. Ela detecta o formato pelo body, não pela URL: JSON com array `messages`, nenhuma mensagem com role `system`/`tool`/`developer` e `system` ausente, string ou array (bodies OpenAI Chat ficam intocados, com aviso). Preserva URL, método, headers e `signal`. Assim, o que outros plugins injetarem antes (texto, datas, URL de bridge) é corrigido no ano e o resto do texto deles fica idêntico.
-- Testado com formas de `opencode-model-router` (hooks `context`/`execute.*`, sem `http.request`) e `opencode-anthropic-fix` (troca a URL por uma bridge local e usa body em streaming).
-- **Não suportado:** plugin que mute o body **depois** do `future-clock`.
-- Hooks nunca derrubam a sessão: erros são logados (`[future-clock] …`) e o evento segue intacto.
+Os anos-alvo são o ano real e os vizinhos (±1). Assim, "mês que vem" em dezembro também é coberto.
+
+O plugin **só altera o que o modelo vê**. Argumentos de comandos, relógio do sistema e arquivos não são tocados. Se um hook falhar, o erro é logado com prefixo `[future-clock]` e a sessão segue normalmente.
+
+## Convivência com outros plugins
+
+- O opencode carrega os plugins da config global, depois os do projeto, depois na ordem do array `plugins`. Os hooks rodam em ordem de registro e não há opção de prioridade.
+- A passada final no `http.request` reescreve o corpo **depois** de todos os hooks. Se outro plugin reinserir a data real (no system, numa descrição ou na saída do `shell`), o `future-clock` corrige. O resto do texto do outro plugin fica idêntico, byte a byte.
+- O formato é detectado pelo corpo, não pela URL. Isso funciona mesmo quando outro plugin troca a URL por uma bridge local. Só o formato **Anthropic Messages** é tratado. Corpos com mensagens de role `system`, `tool` ou `developer` (OpenAI Chat) seguem intactos, com aviso, e para esses providers valem apenas os hooks.
+- Validado ponta a ponta com `opencode-model-router` ativo (inclusive nos subagentes que ele cria). O caminho do `opencode-anthropic-fix` (bridge local, corpo em stream) foi validado só em teste unitário.
+- **Não suportado:** plugin que altere o corpo da requisição *depois* do `future-clock`.
 
 ## Dump para depuração
 
-A env `FUTURE_CLOCK_DUMP_DIR` liga o dump na fronteira `http.request`.
+A variável `FUTURE_CLOCK_DUMP_DIR` grava, para cada requisição, o corpo final enviado ao modelo:
 
 ```powershell
-$env:FUTURE_CLOCK_DUMP_DIR = "C:\Users\<voce>\Temp\future-dumps"
+$env:FUTURE_CLOCK_DUMP_DIR = "C:\temp\future-dumps"
 ```
 
-- O caminho deve ser **absoluto**, fora do repositório, sem UNC, sem caminho relativo à raiz e sem `..`. Caso contrário o plugin falha no `setup` com mensagem explícita.
-- Grava **somente bodies** (`<sessionID>-<kind>-<seq>.json`, mais um `.l3.json` lateral com o número de correções e a **origem** da URL da requisição: esquema + host, sem path nem query). Não grava headers.
-- **Atenção:** o body contém o seu prompt e a conversa completos (system, mensagens, resultados de tools, conteúdo de arquivos lidos). Trate os arquivos como sensíveis, não os versione nem os compartilhe, e apague-os depois do uso.
+- O caminho tem que ser absoluto, fora do repositório, sem UNC e sem `..`. Caso contrário, o plugin falha no carregamento.
+- São gravados `<sessionID>-<kind>-<seq>.json` (o corpo) e `….l3.json` (quantas correções a passada final fez e a origem da URL, só esquema e host). Headers nunca são gravados.
+- **Os dumps contêm o prompt e a conversa inteiros**, inclusive instruções globais e conteúdo de arquivos lidos. Não versione, não compartilhe e apague depois.
 
-## Scripts
+---
 
-| Comando | Função |
+## Desenvolvimento
+
+| Comando | O que faz |
 |---|---|
 | `bun run check` | typecheck + testes unitários + build |
-| `bun run build` | gera `dist\future-clock` |
+| `bun run test` | testes unitários (rápidos, sem rede) |
+| `bun run build` | gera `dist\future-clock\` |
+| `bun run test:e2e` | suíte ponta a ponta contra o opencode real (E0–E6). Compila antes. Execução única, log completo em arquivo |
+| `bun run experiment` | experimento controle × tratamento. Compila antes, é retomável (repita até imprimir `COMPLETE`) e gera `runs\summary.json` |
 | `bun run sandbox` / `sandbox:control` | recria o sandbox com / sem o plugin |
-| `bun run test:e2e` | suíte ponta a ponta, execução única (não retomável); log completo em `%TEMP%\Claude\future-artifacts\state\e2e-*.log` |
-| `bun run experiment` | compila primeiro; bateria controle × tratamento retomável; grava `runs\summary.json` ao final |
-| `bun run cleanup` | apaga `D:\future-sandbox`, `D:\future-probe`, a config isolada e `probe\dist`; preserva `runs` e `dumps` |
+| `bun run cleanup` | apaga sandbox e configs temporárias; **preserva** runs e dumps |
+| `bun run preflight` / `probe` | captura o ambiente e sonda a API de plugins da v2 (usados no planejamento) |
 
-### Sandbox e isolamento
+### Ambiente de teste
 
-- O sandbox fica em `D:\future-sandbox`, **fora do home**: o opencode procura `AGENTS.md` subindo os diretórios, e um sandbox sob o home herda o `AGENTS.md` global.
-- O isolamento é `XDG_CONFIG_HOME` apontando para uma config vazia, mais `opencode run --standalone`. `OPENCODE_CONFIG_DIR` não substitui a config global.
-- Modelo padrão: `opencode-go/claude-haiku-5-5`.
-- `e2e` e `experiment` chamam o opencode real e criam sessões no diretório de dados dele (não isolado).
-- **E6 usa a config global real:** carrega os plugins globais e seus dumps contêm o seu `AGENTS.md` global. Trate esses dumps como sensíveis.
-- Os caminhos sob `%TEMP%\Claude` são o layout desta máquina (constantes em `artifacts.ts`); ajuste-os em outras máquinas.
-- `bun run cleanup` **preserva** `runs` e `dumps`, que são a evidência do relatório. Para apagá-los manualmente: `%TEMP%\Claude\future-artifacts\runs` e `%TEMP%\Claude\future-artifacts\dumps`. Os dumps têm o mesmo caráter sensível descrito acima.
+- **Sandbox:** `D:\future-sandbox`, com `git init`. Fica **fora da pasta do usuário** porque o opencode procura `AGENTS.md` subindo diretórios; dentro do home, o `AGENTS.md` global vazava para o teste.
+- **Isolamento:** `XDG_CONFIG_HOME` apontando para uma config vazia, mais `opencode run --standalone`. `OPENCODE_CONFIG_DIR` não substitui a config global. O cenário E6 roda de propósito **sem** isolamento, para exercitar os plugins globais reais.
+- **Ambiente do processo filho:** o runner limpa `INIT_CWD`, `npm_*` e `OPENCODE_*` herdados. Sem isso, o opencode filho iniciava no diretório do repositório em vez do sandbox.
+- **Modelo padrão:** `opencode-go/claude-haiku-5-5`.
+- **Artefatos** (runs, dumps, estado, logs) ficam em `%TEMP%\Claude\future-artifacts\`. Os caminhos são constantes em `scripts/lib/artifacts.ts`; ajuste-os em outra máquina.
 
 ## Limitações
 
-- **Dia da semana permanece:** com 2146, 12/10 continua "Mon" mesmo sendo quarta. Um 29/02 pode virar uma data inexistente.
-- Epoch/ticks, web, arquivos, `git log`, mtimes e cabeçalhos HTTP continuam no ano real. Em saída classificada, nomes de arquivo com o ano atual também são trocados (o modelo pode ver `log-2146…` enquanto o disco tem `log-2026…`).
-- Datas digitadas pelo modelo não são invertidas.
-- Leituras indiretas do relógio (script em arquivo) não são detectadas. Saídas de outros tools que não `shell` não passam pelo classificador.
-- **Formatos não cobertos:** `Oct 2026`, `12-Oct-2026`, `2026/10/12`, `Current year: 2026`, `yy`, `yyyyMM`. No modo `clock`, `HHmm` entre 20:25 e 20:27 pode ser deslocado em `yyyyMMdd-HHmm`.
-- **Lacunas do classificador de comandos:** `/usr/bin/date`, `TZ=UTC date`, crases (backticks), `$d = date`, `$(` dentro de aspas duplas e `'` desbalanceado em comentários `#` podem gerar falso negativo ou positivo.
-- Na fronteira só o formato **Anthropic Messages** é tratado. Para outros providers (inclusive OpenAI Chat) vale apenas o que os hooks (`context`, `execute.after`) cobrem; body desconhecido segue intacto, com aviso.
-- Plugins que só leem eventos podem ver o ano real.
+- **O dia da semana não muda:** 12/10/2146 é quarta, mas o modelo vê "Mon". Um 29/02 pode virar uma data inexistente.
+- **Continuam no ano real:** epoch e ticks, web, conteúdo de arquivos, `git log`, mtimes e headers HTTP.
+- **Saídas compostas:** numa saída de relógio que também lista arquivos, nomes com o ano atual são trocados (o modelo vê `log-2146…`, o disco tem `log-2026…`).
+- **Datas digitadas pelo modelo não são revertidas.** Por exemplo, `git log --since=2146-01-01` volta vazio.
+- **Leituras indiretas** do relógio, como um script em arquivo, não são detectadas.
+- **Formatos não cobertos:** `Oct 2026`, `12-Oct-2026`, `Current year: 2026`, `yy`, `yyyyMM`.
+- **Lacunas do classificador de comandos:** `/usr/bin/date`, `TZ=UTC date`, crases, `$d = date`, `$(` dentro de aspas duplas.
+- **Observadores:** plugins que só *leem* eventos podem ver o ano real.
 
-## Relatório do experimento
+## Estrutura
 
-Comparação controle × tratamento em [docs/experiments/future-report.md](docs/experiments/future-report.md).
+```
+src/core/         troca de ano (years.ts) e classificador de comandos (classify.ts), puros
+src/plugin/       entrypoint, adaptador do host, hooks context / execute.after / http.request, wire format
+scripts/          build, sandbox, runner do opencode, experimento, limpeza, pre-flight e probes
+test/unit/        testes unitários (inclui convivência com plugins vizinhos e varredura de segredos)
+test/e2e/         suíte ponta a ponta (só roda via bun run test:e2e)
+docs/plans/       plano de implementação e evidências (pre-flight, decisões, QA, e2e)
+docs/experiments/ relatório do experimento
+```
+
+## Licença
+
+[MIT](LICENSE)
