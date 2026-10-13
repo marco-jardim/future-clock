@@ -215,7 +215,7 @@ describe("sandbox", () => {
       plugins: [{ package: PLUGIN_DIR, options: { years: 120 } }],
     });
     expect(sandboxConfig({ arm: "control", model: "m/y" })["plugins"]).toEqual([]);
-    expect(PLUGIN_DIR.toLowerCase()).toBe("d:\\git\\future-agents\\dist\\future-clock");
+    expect(PLUGIN_DIR.toLowerCase()).toBe(join(import.meta.dir, "..", "..", "..", "dist", "future-clock").toLowerCase());
   });
 });
 
