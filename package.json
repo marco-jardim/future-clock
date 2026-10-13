@@ -1,0 +1,25 @@
+{
+  "name": "future-clock",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test ./test/unit",
+    "check": "bun run typecheck && bun run test && bun run build",
+    "build": "bun scripts/build.ts",
+    "test:e2e": "bun scripts/run-e2e.ts",
+    "preflight": "bun scripts/preflight/env.ts",
+    "probe": "bun scripts/probe/run-probe.ts",
+    "sandbox": "bun scripts/sandbox.ts",
+    "sandbox:control": "bun scripts/sandbox.ts control",
+    "experiment": "bun scripts/experiment.ts",
+    "commit": "bun scripts/git/commit.ts",
+    "cleanup": "bun scripts/cleanup.ts"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.0.27",
+    "@types/bun": "1.4.3",
+    "typescript": "5.9.3"
+  }
+}
