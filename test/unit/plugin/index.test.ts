@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { resolveDumpDir, setupWith } from "../../../src/plugin/index";
+import { findRepoRoot, resolveDumpDir, setupWith } from "../../../src/plugin/index";
 import type { ContextEvent } from "../../../src/plugin/ports";
 import { createFakeHost } from "./fake-ctx";
 
@@ -152,5 +153,62 @@ describe("resolveDumpDir (N6)", () => {
   test("default protected root is this repository", () => {
     const insideRepo = resolve(import.meta.dir, "..", "..", "..", "dist", "dumps");
     expect(() => resolveDumpDir({ FUTURE_CLOCK_DUMP_DIR: insideRepo })).toThrow(/inside the repository/);
+  });
+
+  test("no repository found: only the containment check is skipped", () => {
+    const noRepo = (dir: string): string | undefined =>
+      resolveDumpDir({ FUTURE_CLOCK_DUMP_DIR: dir }, () => undefined, "win32");
+    expect(noRepo("D:\\git\\future-agents\\.tmp\\dumps")).toBe("D:\\git\\future-agents\\.tmp\\dumps");
+    expect(() => noRepo("relative\\dumps")).toThrow(/must be an absolute path/);
+    expect(() => noRepo("\\\\server\\share\\dumps")).toThrow(/UNC/);
+    expect(() => noRepo("\\dumps")).toThrow(/root-relative/);
+    expect(() => noRepo("C:\\dumps\\..\\x")).toThrow(/'\.\.' segments/);
+  });
+
+  test("protected root is looked up lazily, only when FUTURE_CLOCK_DUMP_DIR is set", () => {
+    let lookups = 0;
+    const lookup = (): string => {
+      lookups += 1;
+      return winRepo;
+    };
+    expect(resolveDumpDir({}, lookup, "win32")).toBeUndefined();
+    expect(resolveDumpDir({ FUTURE_CLOCK_DUMP_DIR: "" }, lookup, "win32")).toBeUndefined();
+    expect(lookups).toBe(0);
+    expect(() => resolveDumpDir({ FUTURE_CLOCK_DUMP_DIR: "D:\\git\\future-agents\\x" }, lookup, "win32")).toThrow(
+      /inside the repository/,
+    );
+    expect(lookups).toBe(1);
+  });
+});
+
+describe("findRepoRoot", () => {
+  test("default (source location) resolves to this repository", () => {
+    expect(findRepoRoot()).toBe(resolve(import.meta.dir, "..", "..", ".."));
+  });
+
+  test("candidate two levels up counts only when it holds .git", () => {
+    const moduleDir = resolve("cache", "node_modules", "opencode-future-clock");
+    const candidate = resolve(moduleDir, "..", "..");
+    expect(findRepoRoot(moduleDir, () => false)).toBeUndefined();
+    const probed: string[] = [];
+    const exists = (path: string): boolean => {
+      probed.push(path);
+      return path === join(candidate, ".git");
+    };
+    expect(findRepoRoot(moduleDir, exists)).toBe(candidate);
+    expect(probed).toEqual([join(candidate, ".git")]);
+  });
+
+  test("real filesystem: no .git means no protected root, a .git directory means protected", async () => {
+    const base = await mkdtemp(join(tmpdir(), "future-clock-repo-root-"));
+    try {
+      const moduleDir = join(base, "dist", "future-clock");
+      await mkdir(moduleDir, { recursive: true });
+      expect(findRepoRoot(moduleDir)).toBeUndefined();
+      await mkdir(join(base, ".git"));
+      expect(findRepoRoot(moduleDir)).toBe(resolve(base));
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
   });
 });

@@ -6,7 +6,8 @@
  * plugin context. This is the only place in src/ that reads the wall clock.
  */
 
-import { dirname, posix, resolve, win32 } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Plugin } from "@opencode/plugin";
 import { createBoundaryHook } from "./boundary-hook";
@@ -26,10 +27,23 @@ function describeError(error: unknown): string {
 }
 
 /**
- * Repository root. This module sits two directories below it both as source
+ * Repository root to protect from dumps, or undefined when there is none.
+ * In a checkout this module sits two directories below the root both as source
  * (`src/plugin/index.ts`) and as the bundle (`dist/future-clock/server.js`).
+ * When installed from npm the module lives in some cache's node_modules, where
+ * "two levels up" is meaningless; so the candidate only counts when it holds a
+ * `.git` entry (a directory, or the `.git` file of a worktree/submodule).
  */
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+export function findRepoRoot(
+  moduleDir: string = dirname(fileURLToPath(import.meta.url)),
+  exists: (path: string) => boolean = existsSync,
+): string | undefined {
+  const candidate = resolve(moduleDir, "..", "..");
+  return exists(join(candidate, ".git")) ? candidate : undefined;
+}
+
+/** A fixed root, or a lazy lookup (called only when FUTURE_CLOCK_DUMP_DIR is set); undefined skips the check. */
+export type ProtectedRoot = string | (() => string | undefined);
 
 /** `..` plus the Win32 spellings that normalize to it (`...`, `.. `). */
 const PARENT_SEGMENT = /^\.\.[. ]*$/;
@@ -56,12 +70,14 @@ function isInside(child: string, root: string, api: PathApi): boolean {
 /**
  * Validates `FUTURE_CLOCK_DUMP_DIR`: absolute, not UNC (`\\x`, `//x`), not
  * root-relative (`\x`; also `/x` on win32), no `..` segments, and not inside
- * `protectedRoot` (the repository, compared case-insensitively).
+ * `protectedRoot` (the repository, compared case-insensitively). The default
+ * root is looked up lazily via `findRepoRoot`; when no repository is found
+ * (npm install) only the containment check is skipped.
  * Returns undefined when unset/empty; throws a clear error otherwise.
  */
 export function resolveDumpDir(
   env: FutureClockEnv,
-  protectedRoot: string = REPO_ROOT,
+  protectedRoot: ProtectedRoot = findRepoRoot,
   platform: NodeJS.Platform = process.platform,
 ): string | undefined {
   const raw = env.FUTURE_CLOCK_DUMP_DIR;
@@ -77,8 +93,9 @@ export function resolveDumpDir(
   if (raw.split(/[\\/]+/).some((segment) => PARENT_SEGMENT.test(segment))) {
     throw reject("must not contain '..' segments");
   }
-  if (isInside(raw, protectedRoot, api)) {
-    throw reject(`must not be inside the repository (${protectedRoot})`);
+  const root = typeof protectedRoot === "string" ? protectedRoot : protectedRoot();
+  if (root !== undefined && isInside(raw, root, api)) {
+    throw reject(`must not be inside the repository (${root})`);
   }
   return raw;
 }
