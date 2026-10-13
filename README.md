@@ -32,14 +32,30 @@ Only the year changes. Day, month, time, and day of the week stay as they are.
 
 ## Quick start
 
+### From npm
+
+The plugin is published as [`opencode-future-clock`](https://www.npmjs.com/package/opencode-future-clock). In the `opencode.json` of the project where you want to simulate the future:
+
+```json
+{
+  "plugins": [
+    { "package": "opencode-future-clock", "options": { "years": 120 } }
+  ]
+}
+```
+
+`opencode plugin add opencode-future-clock` also works, but it adds the plugin to the **global** config, where it applies to every project and loads before the project's plugins.
+
+### From source
+
 ```powershell
 bun install
 bun run build
 ```
 
-The build produces the **directory** `dist\future-clock\` (`package.json` + `server.js`). opencode v2 only accepts local plugins as a directory; file paths and `file://` URLs are rejected.
+The build produces the **directory** `dist\future-clock\` (`package.json`, `server.js`, README and LICENSE), which is the exact content published to npm. opencode v2 only accepts local plugins as a directory; file paths and `file://` URLs are rejected.
 
-In the `opencode.json` of the project where you want to simulate the future, use the absolute path of the `dist\future-clock` directory in your clone:
+Use the absolute path of that directory in your clone:
 
 ```json
 {
@@ -150,6 +166,10 @@ test/e2e/         end-to-end suite (only runs via bun run test:e2e)
 docs/plans/       implementation plan and evidence (pre-flight, decisions, QA, e2e)
 docs/experiments/ experiment report
 ```
+
+## Releasing
+
+Releases are published by `.github/workflows/publish.yml` with npm trusted publishing (OIDC): no npm token is stored in the repository, and provenance is attached automatically. To release, bump `version` in the root `package.json`, merge, then push a matching tag (`git tag v0.1.1 && git push origin v0.1.1`). The workflow runs the checks, verifies that the tag matches the built package version, and publishes `dist/future-clock`.
 
 ## License
 
